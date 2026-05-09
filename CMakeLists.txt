@@ -63,6 +63,33 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# -----------------------------------------------------------------------------
+# Optional ARM SVE2 acceleration for varint list encoders.
+#
+# When THRIFT_ENABLE_ARM_SVE2=ON on an aarch64 host, a single translation
+# unit (thrift/lib/cpp2/protocol/CompactProtocolSve.cpp) is compiled with
+#   -march=armv8-a+sve2-bitperm
+# and with the preprocessor flag THRIFT_HAS_ARM_SVE2 defined. That TU
+# contains the SVE2 kernels plus a runtime CPU-capability probe. All other
+# TUs - inside fbthrift as well as downstream consumers (benchmarks,
+# services, etc.) - keep their default compile flags and reach the SVE2
+# fast path purely through exported dispatch function symbols. This
+# completely removes the need for downstream projects to specify any ARM
+# feature flags, which previously caused unrelated codegen changes (for
+# example in the varint *deserialization* path).
+# -----------------------------------------------------------------------------
+option(THRIFT_ENABLE_ARM_SVE2
+  "Enable ARM SVE2 accelerated varint list encoders (aarch64 only)"
+  OFF)
+set(THRIFT_ARM_SVE2_FLAGS "")
+if(THRIFT_ENABLE_ARM_SVE2 AND
+   CMAKE_SYSTEM_PROCESSOR MATCHES "(aarch64|arm64|AArch64|ARM64)")
+  set(THRIFT_ARM_SVE2_FLAGS "-march=armv8-a+sve2-bitperm")
+  message(STATUS
+    "Thrift: ARM SVE2 enabled for CompactProtocolSve.cpp via "
+    "${THRIFT_ARM_SVE2_FLAGS}. Other TUs keep default compile flags.")
+endif()
+
 # Enable modular builds
 option(compiler_only "Build the Thrift Compiler only" OFF)
 option(lib_only "Build the Thrift Libraries only" OFF)

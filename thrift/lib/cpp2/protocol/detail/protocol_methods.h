@@ -497,6 +497,115 @@ struct protocol_methods<
     std::enable_if_t<std::is_enum<Type>::value>> : enum_protocol_methods<Type> {
 };
 
+// SFINAE helpers for dispatching list<i16/i32/i64> writes to a protocol's
+// batched varint list API (e.g. CompactProtocolWriter::writeI{16,32,64}List).
+// This keeps the wire format identical to the per-element loop below, so
+// readers don't need to change.
+template <class Protocol, class Elem, class = void>
+struct has_batched_int_list_writer : std::false_type {};
+
+template <class Protocol>
+struct has_batched_int_list_writer<
+    Protocol,
+    std::int16_t,
+    folly::void_t<decltype(std::declval<Protocol&>().writeI16List(
+        std::declval<const std::int16_t*>(), std::uint32_t{}))>>
+    : std::true_type {};
+
+template <class Protocol>
+struct has_batched_int_list_writer<
+    Protocol,
+    std::int32_t,
+    folly::void_t<decltype(std::declval<Protocol&>().writeI32List(
+        std::declval<const std::int32_t*>(), std::uint32_t{}))>>
+    : std::true_type {};
+
+template <class Protocol>
+struct has_batched_int_list_writer<
+    Protocol,
+    std::int64_t,
+    folly::void_t<decltype(std::declval<Protocol&>().writeI64List(
+        std::declval<const std::int64_t*>(), std::uint32_t{}))>>
+    : std::true_type {};
+
+template <class Container, class Elem, class = void>
+struct is_contiguous_elem_container : std::false_type {};
+
+template <class Container, class Elem>
+struct is_contiguous_elem_container<
+    Container,
+    Elem,
+    folly::void_t<
+        decltype(std::declval<const Container&>().data()),
+        decltype(std::declval<const Container&>().size())>>
+    : std::is_same<
+          const Elem*,
+          decltype(std::declval<const Container&>().data())> {};
+
+// Enable the batched list-write fast path whenever the writer exposes the
+// `writeI{N}List` API and the container is contiguous. The dispatcher in
+// CompactProtocolSve.cpp picks between an SVE2 kernel and a scalar fallback
+// at runtime, so downstream consumers never need to compile with any ARM
+// feature flag to reach the fast path. On x86 / non-SVE2 ARM the scalar
+// dispatcher produces the exact same bytes as the original per-element loop.
+template <class Protocol, class Container, class Elem>
+constexpr bool can_batch_int_list_write_v =
+    has_batched_int_list_writer<Protocol, Elem>::value &&
+    is_contiguous_elem_container<Container, Elem>::value;
+
+// SFINAE helpers for dispatching list<i16/i32/i64> reads to a protocol's
+// batched API (e.g. BinaryProtocolReader::readI{16,32,64}List). Symmetric
+// to has_batched_int_list_writer above. Wire bytes are unchanged.
+template <class Protocol, class Elem, class = void>
+struct has_batched_int_list_reader : std::false_type {};
+
+template <class Protocol>
+struct has_batched_int_list_reader<
+    Protocol,
+    std::int16_t,
+    folly::void_t<decltype(std::declval<Protocol&>().readI16List(
+        std::declval<std::int16_t*>(), std::uint32_t{}))>>
+    : std::true_type {};
+
+template <class Protocol>
+struct has_batched_int_list_reader<
+    Protocol,
+    std::int32_t,
+    folly::void_t<decltype(std::declval<Protocol&>().readI32List(
+        std::declval<std::int32_t*>(), std::uint32_t{}))>>
+    : std::true_type {};
+
+template <class Protocol>
+struct has_batched_int_list_reader<
+    Protocol,
+    std::int64_t,
+    folly::void_t<decltype(std::declval<Protocol&>().readI64List(
+        std::declval<std::int64_t*>(), std::uint32_t{}))>>
+    : std::true_type {};
+
+// True iff `Container` exposes both `.resize(size_t)` and `.data()` returning
+// a writable `Elem*`. Matches std::vector<int{16,32,64}_t>, folly::fbvector
+// and any other contiguous resizable container; rejects std::list / std::deque
+// / non-contiguous types at compile time.
+template <class Container, class Elem, class = void>
+struct is_resizable_elem_container : std::false_type {};
+
+template <class Container, class Elem>
+struct is_resizable_elem_container<
+    Container,
+    Elem,
+    folly::void_t<
+        decltype(std::declval<Container&>().resize(std::size_t{})),
+        decltype(std::declval<Container&>().data())>>
+    : std::is_same<
+          Elem*,
+          decltype(std::declval<Container&>().data())> {};
+
+template <class Protocol, class Container, class Elem>
+constexpr bool can_batch_int_list_read_v =
+    has_batched_int_list_reader<Protocol, Elem>::value &&
+    is_resizable_elem_container<Container, Elem>::value;
+
 /*
  * List Specialization
  */
@@ -533,9 +642,30 @@ struct protocol_methods<type_class::list<ElemClass>, Type> {
           protocol::TProtocolException::throwTruncatedData();
         }
 
-        reserve_if_possible(&out, list_size);
-        while (list_size--) {
-          elem_methods::read(protocol, emplace_back_default(out));
+        // Fast path: contiguous resizable list of int16/int32/int64 on a
+        // protocol that exposes readI{N}List (currently BinaryProtocolReader).
+        // Pulls all bytes in one cursor call and bswaps in a vectorizable
+        // loop. Result is byte-equivalent to the per-element path.
+        if constexpr (
+            std::is_same_v<ElemClass, type_class::integral> &&
+            (std::is_same_v<elem_type, std::int16_t> ||
+             std::is_same_v<elem_type, std::int32_t> ||
+             std::is_same_v<elem_type, std::int64_t>) &&
+            can_batch_int_list_read_v<Protocol, Type, elem_type>) {
+          const std::size_t old_size = out.size();
+          out.resize(old_size + list_size);
+          if constexpr (std::is_same_v<elem_type, std::int16_t>) {
+            protocol.readI16List(out.data() + old_size, list_size);
+          } else if constexpr (std::is_same_v<elem_type, std::int32_t>) {
+            protocol.readI32List(out.data() + old_size, list_size);
+          } else {
+            protocol.readI64List(out.data() + old_size, list_size);
+          }
+        } else {
+          reserve_if_possible(&out, list_size);
+          while (list_size--) {
+            elem_methods::read(protocol, emplace_back_default(out));
+          }
         }
       }
     }
@@ -549,16 +679,36 @@ struct protocol_methods<type_class::list<ElemClass>, Type> {
 
   template <typename Protocol>
   static std::size_t write(Protocol& protocol, const Type& out) {
-    std::size_t xfer = 0;
+    // Fast path: contiguous list of int16/int32/int64 on a protocol that
+    // exposes writeI{N}List (currently only CompactProtocolWriter). The
+    // batched method emits exactly the same bytes as
+    // writeListBegin(...) + per-element writeI{N}(...) + writeListEnd(...).
+    if constexpr (
+        std::is_same_v<ElemClass, type_class::integral> &&
+        (std::is_same_v<elem_type, std::int16_t> ||
+         std::is_same_v<elem_type, std::int32_t> ||
+         std::is_same_v<elem_type, std::int64_t>) &&
+        can_batch_int_list_write_v<Protocol, Type, elem_type>) {
+      const std::uint32_t size = checked_container_size(out.size());
+      if constexpr (std::is_same_v<elem_type, std::int16_t>) {
+        return protocol.writeI16List(out.data(), size);
+      } else if constexpr (std::is_same_v<elem_type, std::int32_t>) {
+        return protocol.writeI32List(out.data(), size);
+      } else {
+        return protocol.writeI64List(out.data(), size);
+      }
+    } else {
+      std::size_t xfer = 0;
 
-    xfer += protocol.writeListBegin(
-        elem_ttype::value, checked_container_size(out.size()));
+      xfer += protocol.writeListBegin(
+          elem_ttype::value, checked_container_size(out.size()));
 
-    for (const auto& elem : out) {
-      xfer += elem_methods::write(protocol, elem);
+      for (const auto& elem : out) {
+        xfer += elem_methods::write(protocol, elem);
+      }
+      xfer += protocol.writeListEnd();
+      return xfer;
     }
-    xfer += protocol.writeListEnd();
-    return xfer;
   }
 
   template <bool ZeroCopy, typename Protocol>

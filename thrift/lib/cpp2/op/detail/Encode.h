@@ -453,19 +453,55 @@ struct Encode<type::enum_t<T>> {
   }
 };
 
-// TODO: add optimization used in protocol_methods.h
+// Map an integral Tag to its native C++ element type for the batched
+// varint-list fast path below.
+template <typename Tag>
+struct batched_int_list_elem {
+  using type = void;
+};
+template <>
+struct batched_int_list_elem<type::i16_t> {
+  using type = std::int16_t;
+};
+template <>
+struct batched_int_list_elem<type::i32_t> {
+  using type = std::int32_t;
+};
+template <>
+struct batched_int_list_elem<type::i64_t> {
+  using type = std::int64_t;
+};
+
 template <typename Tag>
 struct Encode<type::list<Tag>> {
   template <typename Protocol, typename T>
   uint32_t operator()(Protocol& prot, const T& list) const {
-    uint32_t xfer = 0;
-    xfer += prot.writeListBegin(
-        typeTagToTType<Tag>, checked_container_size(list.size()));
-    for (const auto& elem : list) {
-      xfer += Encode<Tag>{}(prot, elem);
+    using ElemT = typename batched_int_list_elem<Tag>::type;
+    // Fast path: list<i16|i32|i64> in a contiguous container (vector-like),
+    // on a protocol that exposes writeI{N}List (currently
+    // CompactProtocolWriter). Emits identical bytes to the per-element loop.
+    if constexpr (
+        !std::is_void_v<ElemT> &&
+        apache::thrift::detail::pm::
+            can_batch_int_list_write_v<Protocol, T, ElemT>) {
+      const uint32_t size = checked_container_size(list.size());
+      if constexpr (std::is_same_v<ElemT, std::int16_t>) {
+        return prot.writeI16List(list.data(), size);
+      } else if constexpr (std::is_same_v<ElemT, std::int32_t>) {
+        return prot.writeI32List(list.data(), size);
+      } else {
+        return prot.writeI64List(list.data(), size);
+      }
+    } else {
+      uint32_t xfer = 0;
+      xfer += prot.writeListBegin(
+          typeTagToTType<Tag>, checked_container_size(list.size()));
+      for (const auto& elem : list) {
+        xfer += Encode<Tag>{}(prot, elem);
+      }
+      xfer += prot.writeListEnd();
+      return xfer;
     }
-    xfer += prot.writeListEnd();
-    return xfer;
   }
 };
 
@@ -637,7 +673,6 @@ struct Decode<type::enum_t<T>> {
   }
 };
 
-// TODO: add optimization used in protocol_methods.h
 template <typename Tag>
 struct Decode<type::list<Tag>> {
   template <typename Protocol, typename ListType>
@@ -645,11 +680,33 @@ struct Decode<type::list<Tag>> {
     TType t;
     uint32_t s;
     prot.readListBegin(t, s);
-    apache::thrift::detail::pm::reserve_if_possible(&list, s);
     if (typeTagToTType<Tag> == t) {
-      while (s--) {
-        auto&& elem = apache::thrift::detail::pm::emplace_back_default(list);
-        Decode<Tag>{}(prot, elem);
+      // Fast path mirrors protocol_methods.h: list<i16|i32|i64> in a
+      // contiguous resizable container (vector-like) on a reader that
+      // exposes readI{N}List (currently BinaryProtocolReader). Wire bytes
+      // are unchanged.
+      using ElemT = typename ListType::value_type;
+      if constexpr (
+          (std::is_same_v<ElemT, std::int16_t> ||
+           std::is_same_v<ElemT, std::int32_t> ||
+           std::is_same_v<ElemT, std::int64_t>) &&
+          apache::thrift::detail::pm::
+              can_batch_int_list_read_v<Protocol, ListType, ElemT>) {
+        const std::size_t old_size = list.size();
+        list.resize(old_size + s);
+        if constexpr (std::is_same_v<ElemT, std::int16_t>) {
+          prot.readI16List(list.data() + old_size, s);
+        } else if constexpr (std::is_same_v<ElemT, std::int32_t>) {
+          prot.readI32List(list.data() + old_size, s);
+        } else {
+          prot.readI64List(list.data() + old_size, s);
+        }
+      } else {
+        apache::thrift::detail::pm::reserve_if_possible(&list, s);
+        while (s--) {
+          auto&& elem = apache::thrift::detail::pm::emplace_back_default(list);
+          Decode<Tag>{}(prot, elem);
+        }
       }
     } else {
       while (s--) {

@@ -128,6 +128,23 @@ class CompactProtocolWriter : public detail::ProtocolBase {
   uint32_t writeRaw(const IOBuf& buf);
 
   /**
+   * Batched varint list writers.
+   *
+   * These emit exactly the same bytes as:
+   *   writeListBegin(T_I{16,32,64}, size);
+   *   for (i : 0..size) writeI{16,32,64}(data[i]);
+   *   writeListEnd();
+   * so the reader side does not need any changes.
+   *
+   * The advantage is fewer per-element function calls / buffer growth checks:
+   * we pre-reserve an upper-bound of bytes in the output buffer and then run
+   * a tight varint-encoding loop.
+   */
+  inline uint32_t writeI16List(const int16_t* data, uint32_t size);
+  inline uint32_t writeI32List(const int32_t* data, uint32_t size);
+  inline uint32_t writeI64List(const int64_t* data, uint32_t size);
+
+  /**
    * Functions that return the serialized size
    *
    * Notes:

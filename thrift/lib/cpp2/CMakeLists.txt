@@ -87,6 +87,7 @@ add_library(
   ${metadata-cpp2-SOURCES}
   gen/module_types_cpp.cpp
   protocol/CompactProtocol.cpp # can't link against thriftprotocol, dep cycle
+  protocol/CompactProtocolSve.cpp
   ../cpp/protocol/TProtocolException.cpp
   ../cpp/util/VarintUtils.cpp
 )
@@ -184,6 +185,7 @@ add_library(
   ${RpcMetadata-cpp2-SOURCES}
   gen/module_types_cpp.cpp
   protocol/CompactProtocol.cpp # can't link against thriftprotocol, dep cycle
+  protocol/CompactProtocolSve.cpp
   protocol/JSONProtocolCommon.cpp
   ../cpp/protocol/TBase64Utils.cpp
   ../cpp/protocol/TJSONProtocol.cpp
@@ -204,6 +206,7 @@ add_library(
   protocol/Protocol.cpp
   protocol/BinaryProtocol.cpp
   protocol/CompactProtocol.cpp
+  protocol/CompactProtocolSve.cpp
   protocol/CompactV1Protocol.cpp
   protocol/DebugProtocol.cpp
   protocol/JSONProtocol.cpp
@@ -232,6 +235,25 @@ target_link_libraries(
     ${GLOG_LIBRARIES}
     thrift-core
 )
+
+# -----------------------------------------------------------------------------
+# Apply the ARM SVE2 compile flags to CompactProtocolSve.cpp ONLY.
+#
+# Because CompactProtocolSve.cpp is linked into thriftmetadata, rpcmetadata and
+# thriftprotocol, we attach the flags through set_source_files_properties so
+# they apply to every object-file copy of this source (CMake builds the same
+# .cpp once per library target). No other TU in fbthrift sees -march or
+# THRIFT_HAS_ARM_SVE2, which keeps their codegen byte-identical to pre-patch.
+# -----------------------------------------------------------------------------
+if(THRIFT_ENABLE_ARM_SVE2 AND THRIFT_ARM_SVE2_FLAGS)
+  set_source_files_properties(
+    protocol/CompactProtocolSve.cpp
+    PROPERTIES
+      COMPILE_OPTIONS       "${THRIFT_ARM_SVE2_FLAGS}"
+      COMPILE_DEFINITIONS   "THRIFT_HAS_ARM_SVE2"
+      
+  )
+endif()
 
 bypass_source_check("${RocketUpgrade-cpp2-SOURCES}")
 add_library(

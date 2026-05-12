@@ -101,6 +101,16 @@ class BinaryProtocolWriter : public detail::ProtocolBase {
   uint32_t writeI16(int16_t i16);
   uint32_t writeI32(int32_t i32);
   uint32_t writeI64(int64_t i64);
+  // Batched fixed-width list writers. They emit byte-for-byte the same wire
+  // bytes as `writeListBegin + N x writeI{N} + writeListEnd`, but with a
+  // single `ensure(N * sizeof(T))` and a tight inner loop, which (a) removes
+  // the per-element tailroom-check branch from QueueAppender::writeBE and
+  // (b) gives the compiler an obvious vectorizable bswap loop. The fast path
+  // is automatically picked up by the SFINAE trait in
+  // detail/protocol_methods.h whenever the container is contiguous.
+  uint32_t writeI16List(const int16_t* data, uint32_t size);
+  uint32_t writeI32List(const int32_t* data, uint32_t size);
+  uint32_t writeI64List(const int64_t* data, uint32_t size);
   uint32_t writeDouble(double dub);
   uint32_t writeFloat(float flt);
   uint32_t writeString(folly::StringPiece str);
@@ -247,6 +257,18 @@ class BinaryProtocolReader : public detail::ProtocolBase {
   void readI16(int16_t& i16);
   void readI32(int32_t& i32);
   void readI64(int64_t& i64);
+  // Batched fixed-width list readers. Symmetric to writeI{N}List on the
+  // writer side. Pulls `size * sizeof(T)` raw big-endian bytes from the
+  // cursor in a single call (handling IOBuf-chain crossings internally),
+  // then performs an in-place bswap loop that the compiler auto-vectorizes
+  // (NEON `vrev32q` on aarch64, `pshufb` on x86 with SSSE3+). Wire bytes
+  // are byte-for-byte equivalent to looping `readI{N}` per element. The
+  // fast path is opted into automatically by the SFINAE trait in
+  // detail/protocol_methods.h whenever the destination container is
+  // contiguous and resizable.
+  void readI16List(int16_t* data, uint32_t size);
+  void readI32List(int32_t* data, uint32_t size);
+  void readI64List(int64_t* data, uint32_t size);
   void readDouble(double& dub);
   void readFloat(float& flt);
   template <typename StrType>

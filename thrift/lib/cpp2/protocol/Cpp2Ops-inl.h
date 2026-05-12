@@ -494,6 +494,75 @@ void readIntoVector(Protocol* prot, std::vector<bool>& vec) {
   }
 }
 
+// Detect whether a protocol has writeI{16,32,64}List (currently only
+// CompactProtocolWriter does). Falls back to the per-element loop for any
+// protocol without a batched overload.
+template <class Protocol, class T, class = void>
+struct HasBatchedVarintListWriter : std::false_type {};
+
+template <class Protocol>
+struct HasBatchedVarintListWriter<
+    Protocol,
+    int16_t,
+    folly::void_t<decltype(std::declval<Protocol&>().writeI16List(
+        std::declval<const int16_t*>(), uint32_t{}))>> : std::true_type {};
+
+template <class Protocol>
+struct HasBatchedVarintListWriter<
+    Protocol,
+    int32_t,
+    folly::void_t<decltype(std::declval<Protocol&>().writeI32List(
+        std::declval<const int32_t*>(), uint32_t{}))>> : std::true_type {};
+
+template <class Protocol>
+struct HasBatchedVarintListWriter<
+    Protocol,
+    int64_t,
+    folly::void_t<decltype(std::declval<Protocol&>().writeI64List(
+        std::declval<const int64_t*>(), uint32_t{}))>> : std::true_type {};
+
+// Bulk-write a contiguous list of signed integers. Produces the exact same
+// wire bytes as the per-element path, so readers don't need any change.
+//
+// NOTE: Generated Thrift structs do NOT flow through Cpp2Ops<list<T>>::write
+// when serializing their fields; they go through either
+//   - thrift/lib/cpp2/protocol/detail/protocol_methods.h (legacy pm path), or
+//   - thrift/lib/cpp2/op/detail/Encode.h (new op::encode path),
+// both of which already dispatch to writeI{16,32,64}List automatically when
+// available. This helper is kept for the rare hand-written code that
+// explicitly uses Cpp2Ops to serialize a container.
+//
+// Usage (typically with a CompactProtocolWriter):
+//   apache::thrift::detail::writeVarintList(writer, myVecI32);
+template <class Protocol, class Vec>
+uint32_t writeVarintList(Protocol& prot, const Vec& vec) {
+  using T = typename Vec::value_type;
+  static_assert(
+      std::is_same<T, int16_t>::value || std::is_same<T, int32_t>::value ||
+          std::is_same<T, int64_t>::value,
+      "writeVarintList only supports vectors of int16_t / int32_t / int64_t");
+
+  const uint32_t size = folly::to_narrow(vec.size());
+
+  if constexpr (HasBatchedVarintListWriter<Protocol, T>::value) {
+    if constexpr (std::is_same<T, int16_t>::value) {
+      return prot.writeI16List(vec.data(), size);
+    } else if constexpr (std::is_same<T, int32_t>::value) {
+      return prot.writeI32List(vec.data(), size);
+    } else {
+      return prot.writeI64List(vec.data(), size);
+    }
+  } else {
+    // Fallback: same sequence as Cpp2Ops<list<T>>::write.
+    uint32_t xfer = prot.writeListBegin(Cpp2Ops<T>::thriftType(), size);
+    for (uint32_t i = 0; i < size; ++i) {
+      xfer += Cpp2Ops<T>::write(&prot, &vec[i]);
+    }
+    xfer += prot.writeListEnd();
+    return xfer;
+  }
+}
+
 } // namespace detail
 
 template <class L>

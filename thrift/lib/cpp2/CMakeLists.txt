@@ -419,3 +419,7 @@ install(
   EXPORT fbthrift-exports
   DESTINATION ${LIB_INSTALL_DIR}
 )
+
+if(enable_tests)
+  add_subdirectory(test)
+endif()

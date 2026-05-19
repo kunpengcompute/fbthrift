@@ -243,7 +243,16 @@ class HostType(object):
             return None
         if self.is_darwin():
             return "homebrew"
-        if self.distro in ("fedora", "centos", "centos_stream"):
+        if self.distro in (
+            "fedora",
+            "centos",
+            "centos_stream",
+            "rhel",
+            "openeuler",
+            "eurolinux",
+            "rocky",
+            "almalinux",
+        ):
             return "rpm"
         if self.distro.startswith(("debian", "ubuntu")):
             return "deb"

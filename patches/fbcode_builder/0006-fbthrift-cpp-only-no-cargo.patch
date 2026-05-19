@@ -1,0 +1,18 @@
+--- a/build/fbcode_builder/manifests/fbthrift
++++ b/build/fbcode_builder/manifests/fbthrift
+@@ -4,16 +4,9 @@ shipit_project = fbthrift
+ shipit_fbcode_builder = true
+ 
+-[git]
+-repo_url = https://github.com/facebook/fbthrift.git
+-
+-[cargo]
+-cargo_config_file =  source/thrift/lib/rust/.cargo/config
+-
+-[crate.pathmap]
+-fbthrift = thrift/lib/rust
+-
++# C++ build via build.sh --src-dir; skip [cargo] (copytree of .git blows disk).
+ [build]
+ builder = cmake
+ job_weight_mib = 2048

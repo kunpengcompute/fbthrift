@@ -12,16 +12,18 @@ libsodium-devel
 libsodium-static
 
 [download.not(os=windows)]
-url = https://github.com/jedisct1/libsodium/releases/download/1.0.17/libsodium-1.0.17.tar.gz
-sha256 = 0cc3dae33e642cc187b5ceb467e0ad0e1b51dcba577de1190e9ffa17766ac2b1
+# 1.0.17 GitHub release assets were removed; use 1.0.18 (same autoconf layout).
+url = https://github.com/jedisct1/libsodium/releases/download/1.0.18-RELEASE/libsodium-1.0.18.tar.gz
+sha256 = 6f504490b342a4f8a4c4a02fc9b866cbef8622d5df4e5452b46be121e46636c1
 
 [build.not(os=windows)]
 builder = autoconf
-subdir = libsodium-1.0.17
+subdir = libsodium-1.0.18
 
 [download.os=windows]
-url = https://download.libsodium.org/libsodium/releases/libsodium-1.0.17-msvc.zip
-sha256 = f0f32ad8ebd76eee99bb039f843f583f2babca5288a8c26a7261db9694c11467
+# Official download.libsodium.org no longer hosts 1.0.17 MSVC zip; use GitHub release.
+url = https://github.com/jedisct1/libsodium/releases/download/1.0.18-RELEASE/libsodium-1.0.18-msvc.zip
+sha256 = c1d48d85c9361e350931ffe5067559cd7405a697c655d26955fb568d1084a5f4
 
 [build.os=windows]
 builder = nop

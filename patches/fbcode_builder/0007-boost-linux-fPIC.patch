@@ -1,0 +1,12 @@
+--- a/build/fbcode_builder/manifests/boost
++++ b/build/fbcode_builder/manifests/boost
+@@ -101,6 +101,10 @@ toolset=clang
+ # RHEL hardened gcc is not compatible with PCH
+ # https://bugzilla.redhat.com/show_bug.cgi?id=1806545
+ pch=off
++cflags=-fPIC
++cxxflags=-fPIC
++linkflags=-fPIC
+ 
+ [b2.args.os=darwin]
+ toolset=clang

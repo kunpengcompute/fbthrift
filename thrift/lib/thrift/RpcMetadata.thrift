@@ -37,6 +37,7 @@ typedef binary (cpp2.type = "std::unique_ptr<folly::IOBuf>") IOBufPtr
 enum ProtocolId {
   // The values must match those in thrift/lib/cpp/protocol/TProtocolTypes.h
   BINARY = 0,
+  JSON = 1,
   COMPACT = 2,
 // Deprecated.
 // FROZEN2 = 6,
@@ -67,6 +68,8 @@ enum CompressionAlgorithm {
   NONE = 0,
   ZLIB = 1,
   ZSTD = 2,
+  SNAPPY = 3,
+  LZ4 = 4,
 }
 
 enum ErrorKind {
@@ -91,9 +94,15 @@ struct ZlibCompressionCodecConfig {}
 
 struct ZstdCompressionCodecConfig {}
 
+struct SnappyCompressionCodecConfig {}
+
+struct Lz4CompressionCodecConfig {}
+
 union CodecConfig {
   1: ZlibCompressionCodecConfig zlibConfig;
   2: ZstdCompressionCodecConfig zstdConfig;
+  3: SnappyCompressionCodecConfig snappyConfig;
+  4: Lz4CompressionCodecConfig lz4Config;
 }
 
 struct CompressionConfig {

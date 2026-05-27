@@ -19,6 +19,7 @@
 #include <folly/Utility.h>
 #include <thrift/lib/cpp2/protocol/BinaryProtocol.h>
 #include <thrift/lib/cpp2/protocol/CompactProtocol.h>
+#include <thrift/lib/cpp2/protocol/JSONProtocol.h>
 #include <thrift/lib/cpp2/protocol/Protocol.h>
 
 namespace apache {
@@ -79,6 +80,19 @@ class EnvelopeUtil {
           reader.readMessageBegin(
               envelope.methodName, envelope.messageType, seqId);
           sz = reader.getCursorPosition();
+          break;
+        }
+        case '[': {
+          envelope.protocolId = protocol::T_JSON_PROTOCOL;
+          JSONProtocolReader reader;
+          reader.setInput(payload.get());
+          reader.readMessageBegin(
+              envelope.methodName, envelope.messageType, seqId);
+          {
+            std::string structNameIgnore;
+            reader.readStructBegin(structNameIgnore);
+            sz = reader.getCursorPosition() - 1;
+          }
           break;
         }
         // TODO: Add Frozen2 case.

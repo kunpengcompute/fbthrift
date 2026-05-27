@@ -88,6 +88,18 @@ void HeaderChannel::preprocessHeader(
           compressionConfig.codecConfig_ref() = codec;
           break;
         }
+        case transport::THeader::SNAPPY_TRANSFORM: {
+          apache::thrift::CodecConfig codec;
+          codec.snappyConfig_ref() = apache::thrift::SnappyCompressionCodecConfig();
+          compressionConfig.codecConfig_ref() = codec;
+          break;
+        }
+        case transport::THeader::LZ4_TRANSFORM: {
+          apache::thrift::CodecConfig codec;
+          codec.lz4Config_ref() = apache::thrift::Lz4CompressionCodecConfig();
+          compressionConfig.codecConfig_ref() = codec;
+          break;
+        }
         default:
           LOG(DFATAL) << "Unsupported transform: " << transform;
       }

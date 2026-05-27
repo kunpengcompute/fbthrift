@@ -17,8 +17,10 @@
 #ifndef THRIFT2_PROTOCOL_TBINARYPROTOCOL_TCC_
 #define THRIFT2_PROTOCOL_TBINARYPROTOCOL_TCC_ 1
 
+#include <cstring>
 #include <limits>
 #include <string>
+#include <type_traits>
 
 namespace apache {
 namespace thrift {
@@ -136,6 +138,61 @@ inline uint32_t BinaryProtocolWriter::writeI32(int32_t i32) {
 inline uint32_t BinaryProtocolWriter::writeI64(int64_t i64) {
   out_.writeBE(i64);
   return sizeof(i64);
+}
+
+namespace detail {
+// One-shot reserve + tight bswap+store loop. Compared to the per-element
+// `out_.writeBE(value)` path, this removes:
+//   - N redundant `ensure()` tailroom-check branches inside QueueAppender,
+//   - N `append()` cursor advances (collapsed into one),
+// and exposes a trivially vectorizable inner loop to the compiler (NEON
+// `vrev32q + vst1q` on aarch64, `pshufb + movdqu` on x86 with -O2/-O3).
+//
+// Wire bytes are byte-for-byte identical to the per-element path.
+template <class T>
+FOLLY_ALWAYS_INLINE void writeBeContiguous(
+    folly::io::QueueAppender& out, const T* data, uint32_t size) {
+  static_assert(std::is_integral<T>::value, "T must be integral");
+  if (size == 0) {
+    return;
+  }
+  const size_t total = static_cast<size_t>(size) * sizeof(T);
+  out.ensure(total);
+  uint8_t* dst = out.writableData();
+  for (uint32_t i = 0; i < size; ++i) {
+    const T be = folly::Endian::big(data[i]);
+    std::memcpy(dst, &be, sizeof(T));
+    dst += sizeof(T);
+  }
+  out.append(total);
+}
+} // namespace detail
+
+inline uint32_t BinaryProtocolWriter::writeI16List(
+    const int16_t* data, uint32_t size) {
+  uint32_t xfer = writeListBegin(TType::T_I16, size);
+  detail::writeBeContiguous(out_, data, size);
+  xfer += static_cast<uint32_t>(size) * sizeof(int16_t);
+  xfer += writeListEnd();
+  return xfer;
+}
+
+inline uint32_t BinaryProtocolWriter::writeI32List(
+    const int32_t* data, uint32_t size) {
+  uint32_t xfer = writeListBegin(TType::T_I32, size);
+  detail::writeBeContiguous(out_, data, size);
+  xfer += static_cast<uint32_t>(size) * sizeof(int32_t);
+  xfer += writeListEnd();
+  return xfer;
+}
+
+inline uint32_t BinaryProtocolWriter::writeI64List(
+    const int64_t* data, uint32_t size) {
+  uint32_t xfer = writeListBegin(TType::T_I64, size);
+  detail::writeBeContiguous(out_, data, size);
+  xfer += static_cast<uint32_t>(size) * sizeof(int64_t);
+  xfer += writeListEnd();
+  return xfer;
 }
 
 inline uint32_t BinaryProtocolWriter::writeDouble(double dub) {
@@ -499,6 +556,42 @@ inline void BinaryProtocolReader::readI32(int32_t& i32) {
 
 inline void BinaryProtocolReader::readI64(int64_t& i64) {
   i64 = in_.readBE<int64_t>();
+}
+
+namespace detail {
+// Symmetric to writeBeContiguous: one bulk pull from the cursor + an
+// in-place bswap loop that the compiler auto-vectorizes (NEON `vrev32q`,
+// SSSE3 `pshufb`). Removes the per-element `ensure()` branch hidden inside
+// Cursor::readBE and lets the destination buffer be filled in a single
+// straight-line memory pass.
+template <class T>
+FOLLY_ALWAYS_INLINE void readBeContiguous(
+    folly::io::Cursor& in, T* data, uint32_t size) {
+  static_assert(std::is_integral<T>::value, "T must be integral");
+  if (size == 0) {
+    return;
+  }
+  const size_t total = static_cast<size_t>(size) * sizeof(T);
+  // Pull throws on truncated input, matching the per-element readBE
+  // behavior. canReadNElements has already been validated by the caller in
+  // the typical generated-code path, so this is just a fast bulk copy.
+  in.pull(data, total);
+  for (uint32_t i = 0; i < size; ++i) {
+    data[i] = folly::Endian::big(data[i]);
+  }
+}
+} // namespace detail
+
+inline void BinaryProtocolReader::readI16List(int16_t* data, uint32_t size) {
+  detail::readBeContiguous(in_, data, size);
+}
+
+inline void BinaryProtocolReader::readI32List(int32_t* data, uint32_t size) {
+  detail::readBeContiguous(in_, data, size);
+}
+
+inline void BinaryProtocolReader::readI64List(int64_t* data, uint32_t size) {
+  detail::readBeContiguous(in_, data, size);
 }
 
 inline void BinaryProtocolReader::readDouble(double& dub) {

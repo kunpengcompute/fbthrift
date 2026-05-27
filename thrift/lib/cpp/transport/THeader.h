@@ -256,12 +256,13 @@ class THeader final {
     NONE = 0x00,
     ZLIB_TRANSFORM = 0x01,
     // HMAC_TRANSFORM = 0x02, Deprecated and no longer supported
-    // SNAPPY_TRANSFORM = 0x03, Deprecated and no longer supported
+    SNAPPY_TRANSFORM = 0x03, // Deprecated and no longer supported
     // QLZ_TRANSFORM = 0x04, Deprecated and no longer supported
     ZSTD_TRANSFORM = 0x05,
+    LZ4_TRANSFORM = 0x06,
 
     // DO NOT USE. Sentinel value for enum count. Always keep as last value.
-    TRANSFORM_LAST_FIELD = 0x06,
+    TRANSFORM_LAST_FIELD = 0x07,
   };
 
   /* IOBuf interface */

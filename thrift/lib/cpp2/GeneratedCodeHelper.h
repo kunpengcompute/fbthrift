@@ -56,6 +56,7 @@ namespace thrift {
 
 class BinaryProtocolReader;
 class CompactProtocolReader;
+class JSONProtocolReader;
 
 namespace detail {
 
@@ -754,6 +755,12 @@ GeneratedAsyncProcessorBase::ProcessFunc<Derived> getProcessFuncFromProtocol(
     const GeneratedAsyncProcessorBase::ProcessFuncs<Derived>& funcs) {
   return funcs.binary;
 }
+template <typename Derived>
+GeneratedAsyncProcessorBase::ProcessFunc<Derived> getProcessFuncFromProtocol(
+    folly::tag_t<JSONProtocolReader> /* unused */,
+    const GeneratedAsyncProcessorBase::ProcessFuncs<Derived>& funcs) {
+  return funcs.json;
+}
 
 template <typename Derived>
 GeneratedAsyncProcessorBase::ExecuteFunc<Derived> getExecuteFuncFromProtocol(
@@ -766,6 +773,12 @@ GeneratedAsyncProcessorBase::ExecuteFunc<Derived> getExecuteFuncFromProtocol(
     folly::tag_t<BinaryProtocolReader> /* unused */,
     const GeneratedAsyncProcessorBase::ProcessFuncs<Derived>& funcs) {
   return funcs.binaryExecute;
+}
+template <typename Derived>
+GeneratedAsyncProcessorBase::ExecuteFunc<Derived> getExecuteFuncFromProtocol(
+    folly::tag_t<JSONProtocolReader> /* unused */,
+    const GeneratedAsyncProcessorBase::ProcessFuncs<Derived>& funcs) {
+  return funcs.jsonExecute;
 }
 
 inline void nonRecursiveProcessMissing(
@@ -1042,6 +1055,10 @@ void execute(
       return recursiveProcess<CompactProtocolReader>(
           processor, std::move(request));
     }
+    case protocol::T_JSON_PROTOCOL: {
+      return recursiveProcess<JSONProtocolReader>(
+          processor, std::move(request));
+    }
     default:
       LOG(ERROR) << "invalid protType: " << folly::to_underlying(protType);
       return;
@@ -1066,6 +1083,10 @@ void process(
     }
     case protocol::T_COMPACT_PROTOCOL: {
       return recursiveProcess<CompactProtocolReader>(
+          processor, std::move(req), std::move(serializedRequest), ctx, eb, tm);
+    }
+    case protocol::T_JSON_PROTOCOL: {
+      return recursiveProcess<JSONProtocolReader>(
           processor, std::move(req), std::move(serializedRequest), ctx, eb, tm);
     }
     default:
@@ -1144,6 +1165,16 @@ void process(
           eb,
           tm);
     }
+    case protocol::T_JSON_PROTOCOL: {
+      return nonRecursiveProcessForInteraction<JSONProtocolReader>(
+          processor,
+          std::move(req),
+          std::move(serializedRequest),
+          methodMetadata,
+          ctx,
+          eb,
+          tm);
+    }
     default:
       LOG(ERROR) << "invalid protType: " << folly::to_underlying(protType);
       return;
@@ -1177,6 +1208,11 @@ void execute(
     case protocol::T_COMPACT_PROTOCOL: {
       auto pfn = getExecuteFuncFromProtocol(
           folly::tag<CompactProtocolReader>, methodMetadata.processFuncs);
+      (processor->*pfn)(std::move(request));
+    } break;
+    case protocol::T_JSON_PROTOCOL: {
+      auto pfn = getExecuteFuncFromProtocol(
+          folly::tag<JSONProtocolReader>, methodMetadata.processFuncs);
       (processor->*pfn)(std::move(request));
     } break;
     default:
@@ -1220,8 +1256,10 @@ downcastProcessFuncs(
   return GeneratedAsyncProcessorBase::ProcessFuncs<DerivedProcessor>{
       processFuncs.compact,
       processFuncs.binary,
+      processFuncs.json,
       processFuncs.compactExecute,
-      processFuncs.binaryExecute};
+      processFuncs.binaryExecute,
+      processFuncs.jsonExecute};
 }
 
 template <

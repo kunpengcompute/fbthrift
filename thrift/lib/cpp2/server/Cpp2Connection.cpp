@@ -25,6 +25,7 @@
 #include <thrift/lib/cpp2/async/ResponseChannel.h>
 #include <thrift/lib/cpp2/protocol/BinaryProtocol.h>
 #include <thrift/lib/cpp2/protocol/CompactProtocol.h>
+#include <thrift/lib/cpp2/protocol/JSONProtocol.h>
 #include <thrift/lib/cpp2/server/Cpp2Worker.h>
 #include <thrift/lib/cpp2/server/LoggingEventHelper.h>
 #include <thrift/lib/cpp2/server/MonitoringMethodNames.h>
@@ -416,6 +417,11 @@ void Cpp2Connection::requestReceived(
         case apache::thrift::protocol::T_COMPACT_PROTOCOL:
           response =
               upgradeToRocketReply<apache::thrift::CompactProtocolWriter>(
+                  meta.seqId);
+          break;
+        case apache::thrift::protocol::T_JSON_PROTOCOL:
+          response =
+              upgradeToRocketReply<apache::thrift::JSONProtocolWriter>(
                   meta.seqId);
           break;
         default:

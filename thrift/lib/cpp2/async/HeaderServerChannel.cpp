@@ -117,6 +117,8 @@ HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
     protInBuf = PROTOCOL_TYPES::T_COMPACT_PROTOCOL;
   } else if (byte == 0x80) {
     protInBuf = PROTOCOL_TYPES::T_BINARY_PROTOCOL;
+  } else if (byte == '[') {
+    protInBuf = PROTOCOL_TYPES::T_JSON_PROTOCOL;
   } else if (ct != THRIFT_HTTP_SERVER_TYPE) {
     LOG(ERROR) << "Received corrupted request from client: "
                << getTransportDebugString(channel_.getTransport()) << ". "

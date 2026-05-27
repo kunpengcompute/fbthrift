@@ -37,7 +37,7 @@ inline uint8_t JSONProtocolWriterCommon::hexChar(uint8_t val) {
  */
 
 inline uint32_t JSONProtocolWriterCommon::writeMessageBegin(
-    const std::string& name, MessageType messageType, int32_t seqid) {
+    folly::StringPiece name, MessageType messageType, int32_t seqid) {
   auto ret = beginContext(ContextType::ARRAY);
   ret += writeI32(apache::thrift::detail::json::kThriftVersion1);
   ret += writeString(name);
@@ -366,6 +366,7 @@ inline uint32_t JSONProtocolWriterCommon::writeJSONDouble(T dbl) {
 inline void JSONProtocolReaderCommon::readMessageBegin(
     std::string& name, MessageType& messageType, int32_t& seqid) {
   ensureAndBeginContext(ContextType::ARRAY);
+  messageBeginCalled_ = true;
   int64_t tmpVal;
   readI64(tmpVal);
   if (tmpVal != apache::thrift::detail::json::kThriftVersion1) {
@@ -378,7 +379,9 @@ inline void JSONProtocolReaderCommon::readMessageBegin(
 }
 
 inline void JSONProtocolReaderCommon::readMessageEnd() {
-  endContext();
+  if (messageBeginCalled_) {
+    endContext();
+  }
 }
 
 inline void JSONProtocolReaderCommon::readByte(int8_t& byte) {

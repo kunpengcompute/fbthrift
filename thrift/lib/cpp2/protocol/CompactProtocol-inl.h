@@ -17,9 +17,21 @@
 #ifndef THRIFT2_PROTOCOL_COMPACTPROTOCOL_TCC_
 #define THRIFT2_PROTOCOL_COMPACTPROTOCOL_TCC_ 1
 
+#include <cstring>
 #include <limits>
 
 #include <thrift/lib/cpp/util/VarintUtils.h>
+#include <thrift/lib/cpp2/protocol/detail/CompactProtocolSveDispatch.h>
+
+// The SVE2 accelerated varint-list encoders live in CompactProtocolSve.cpp,
+// which is the *only* translation unit that is compiled with
+// `-march=armv8-a+sve2+sve-bitperm` (controlled by the CMake option
+// THRIFT_ENABLE_ARM_SVE2). Downstream consumers (benchmarks, services, etc.)
+// do NOT need any special compile flag: writeI{16,32,64}List below simply
+// calls the runtime-dispatched entry points declared in
+// CompactProtocolSveDispatch.h, which cache a single
+// `detectRuntimeSve2()` check and either route to the SVE2 kernel or to the
+// scalar encoder. The emitted wire bytes are identical in both cases.
 
 namespace apache {
 namespace thrift {
@@ -285,6 +297,45 @@ inline uint32_t CompactProtocolWriter::writeI32(int32_t i32) {
 inline uint32_t CompactProtocolWriter::writeI64(int64_t i64) {
   return apache::thrift::util::writeVarint(
       out_, apache::thrift::util::i64ToZigzag(i64));
+}
+
+// The SVE2-accelerated batched varint encoders for 32-bit and 64-bit elements
+// have been relocated to thrift/lib/cpp2/protocol/CompactProtocolSve.cpp. The
+// runtime-dispatched entry points declared in CompactProtocolSveDispatch.h
+// (dispatchVarintEncode32 / dispatchVarintEncode64) cache a single CPU-
+// capability probe and route to the SVE2 kernel or to a scalar encoder. This
+// way the `-march=armv8-a+sve2+sve-bitperm` flag only needs to be applied to
+// that single TU inside the fbthrift build, and downstream consumers do NOT
+// need any special compile flags at all.
+inline uint32_t CompactProtocolWriter::writeI16List(
+    const int16_t* data, uint32_t size) {
+  // There is no dedicated 16-bit SVE kernel; fall back to the original
+  // per-element path for all builds. This keeps the emitted bytes identical
+  // to writeI16 in a loop.
+  uint32_t xfer = writeListBegin(TType::T_I16, size);
+  for (uint32_t i = 0; i < size; ++i) {
+    xfer += writeI16(data[i]);
+  }
+  xfer += writeListEnd();
+  return xfer;
+}
+
+inline uint32_t CompactProtocolWriter::writeI32List(
+    const int32_t* data, uint32_t size) {
+  uint32_t xfer = writeListBegin(TType::T_I32, size);
+  xfer += ::apache::thrift::detail::compact::dispatchVarintEncode32(
+      data, size, out_);
+  xfer += writeListEnd();
+  return xfer;
+}
+
+inline uint32_t CompactProtocolWriter::writeI64List(
+    const int64_t* data, uint32_t size) {
+  uint32_t xfer = writeListBegin(TType::T_I64, size);
+  xfer += ::apache::thrift::detail::compact::dispatchVarintEncode64(
+      data, size, out_);
+  xfer += writeListEnd();
+  return xfer;
 }
 
 inline uint32_t CompactProtocolWriter::writeDouble(double dub) {

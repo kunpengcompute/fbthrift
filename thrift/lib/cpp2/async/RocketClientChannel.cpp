@@ -68,7 +68,7 @@ THRIFT_FLAG_DEFINE_bool(rocket_client_new_protocol_key, true);
 THRIFT_FLAG_DEFINE_int64(rocket_client_max_version, kRocketClientMaxVersion);
 THRIFT_FLAG_DEFINE_bool(rocket_client_rocket_skip_protocol_key, false);
 
-THRIFT_FLAG_DEFINE_bool(rocket_client_upgrade_zlib_to_zstd_v2, true);
+THRIFT_FLAG_DEFINE_bool(rocket_client_upgrade_zlib_to_zstd_v2, false);
 
 using namespace apache::thrift::transport;
 
@@ -550,6 +550,12 @@ void RocketClientChannel::setCompression(
             break;
           case CodecConfig::Type::zstdConfig:
             metadata.compression_ref() = CompressionAlgorithm::ZSTD;
+            break;
+          case CodecConfig::Type::snappyConfig:
+            metadata.compression_ref() = CompressionAlgorithm::SNAPPY;
+            break;
+          case CodecConfig::Type::lz4Config:
+            metadata.compression_ref() = CompressionAlgorithm::LZ4;
             break;
           default:
             break;

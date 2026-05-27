@@ -21,6 +21,7 @@
 #include <thrift/lib/cpp2/TrustedServerException.h>
 #include <thrift/lib/cpp2/protocol/BinaryProtocol.h>
 #include <thrift/lib/cpp2/protocol/CompactProtocol.h>
+#include <thrift/lib/cpp2/protocol/JSONProtocol.h>
 #include <thrift/lib/cpp2/protocol/Protocol.h>
 #if __has_include(<thrift/lib/thrift/gen-cpp2/any_rep_types.h>)
 #include <thrift/lib/cpp2/type/Any.h>
@@ -160,6 +161,7 @@ void helper<ProtocolReader, ProtocolWriter>::process_exn(
 
 template struct helper<BinaryProtocolReader, BinaryProtocolWriter>;
 template struct helper<CompactProtocolReader, CompactProtocolWriter>;
+template struct helper<JSONProtocolReader, JSONProtocolWriter>;
 
 template <typename ProtocolReader>
 static bool setupRequestContextWithMessageBegin(
@@ -205,6 +207,9 @@ bool setupRequestContextWithMessageBegin(
     case protocol::T_COMPACT_PROTOCOL:
       return setupRequestContextWithMessageBegin<CompactProtocolReader>(
           msgBegin, req, ctx, eb);
+    case protocol::T_JSON_PROTOCOL:
+      return setupRequestContextWithMessageBegin<JSONProtocolReader>(
+          msgBegin, req, ctx, eb);
     default:
       LOG(ERROR) << "invalid protType: " << folly::to_underlying(protType);
       return false;
@@ -229,6 +234,21 @@ MessageBegin deserializeMessageBegin(
         iprot.setInput(&buf);
         iprot.readMessageBegin(msgBegin.methodName, meta.msgType, meta.seqId);
         meta.size = iprot.getCursorPosition();
+        break;
+      }
+      case protocol::T_JSON_PROTOCOL: {
+        JSONProtocolReader iprot;
+        iprot.setInput(&buf);
+        iprot.readMessageBegin(msgBegin.methodName, meta.msgType, meta.seqId);
+        {
+          std::string structNameIgnore;
+          // consumes ',' (ARRAY separator) + '{' (struct start)
+          iprot.readStructBegin(structNameIgnore);
+          // Subtract 1 so the trimmed body begins with '{', matching the
+          // convention used by Binary/Compact where meta.size points right
+          // before the struct body.
+          meta.size = iprot.getCursorPosition() - 1;
+        }
         break;
       }
       default:

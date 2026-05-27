@@ -120,6 +120,15 @@ FOLLY_NODISCARD folly::exception_wrapper processFirstResponseHelper(
         protocol::TType ftype;
         int16_t fid;
         reader.readStructBegin(methodNameIgnore);
+        if constexpr (std::is_same_v<Serializer, JSONSerializer>) {
+          // JSON: after readMessageBegin, cursor is after seqId.
+          // The next char should be ',' (ARRAY separator before the 5th element).
+          // readStructBegin will consume: whitespace + ',' + whitespace + '{'
+          // We need prefixSize to include the comma but NOT the '{',
+          // so the body starts with '{' after trimming.
+          // Use readStructBegin to consume comma+{, then back up 1 byte.
+          prefixSize = reader.getCursorPosition() - 1; // exclude the '{'
+        }
         reader.readFieldBegin(methodNameIgnore, ftype, fid);
 
         while (payload->length() < prefixSize) {
@@ -375,6 +384,9 @@ FOLLY_NODISCARD folly::exception_wrapper processFirstResponse(
           metadata, payload, version);
     case protocol::T_COMPACT_PROTOCOL:
       return processFirstResponseHelper<CompactSerializer>(
+          metadata, payload, version);
+    case protocol::T_JSON_PROTOCOL:
+      return processFirstResponseHelper<JSONSerializer>(
           metadata, payload, version);
     default: {
       return makeResponseRpcError(

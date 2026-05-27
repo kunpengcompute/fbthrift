@@ -22,6 +22,7 @@
 #include <thrift/lib/cpp/transport/THeader.h>
 #include <thrift/lib/cpp2/protocol/BinaryProtocol.h>
 #include <thrift/lib/cpp2/protocol/CompactProtocol.h>
+#include <thrift/lib/cpp2/protocol/JSONProtocol.h>
 #include <thrift/lib/cpp2/protocol/Serializer.h>
 #include <thrift/lib/cpp2/transport/rocket/PayloadUtils.h>
 
@@ -40,33 +41,46 @@ std::unique_ptr<folly::IOBuf> addEnvelope(
   auto messageBeginSizeUpperBound = writer.serializedMessageSize(methodName);
   folly::IOBufQueue queue;
 
-  // If possible, serialize header into the headeroom of buf.
-  if (!buf->isChained() && buf->headroom() >= messageBeginSizeUpperBound &&
-      !buf->isSharedOne()) {
-    // Store previous state of the buffer pointers and rewind it.
-    auto startBuffer = buf->buffer();
-    auto start = buf->data();
-    auto origLen = buf->length();
-    buf->trimEnd(origLen);
-    buf->retreat(start - startBuffer);
+  if constexpr (!std::is_same_v<ProtocolWriter, JSONProtocolWriter>) {
+    // If possible, serialize header into the headeroom of buf.
+    if (!buf->isChained() && buf->headroom() >= messageBeginSizeUpperBound &&
+        !buf->isSharedOne()) {
+      // Store previous state of the buffer pointers and rewind it.
+      auto startBuffer = buf->buffer();
+      auto start = buf->data();
+      auto origLen = buf->length();
+      buf->trimEnd(origLen);
+      buf->retreat(start - startBuffer);
 
-    queue.append(std::move(buf), false);
-    writer.setOutput(&queue);
-    writer.writeMessageBegin(methodName, mtype, seqid);
+      queue.append(std::move(buf), false);
+      writer.setOutput(&queue);
+      writer.writeMessageBegin(methodName, mtype, seqid);
 
-    // Move the new data to come right before the old data and restore the
-    // old tail pointer.
-    buf = queue.move();
-    buf->advance(start - buf->tail());
-    buf->append(origLen);
+      // Move the new data to come right before the old data and restore the
+      // old tail pointer.
+      buf = queue.move();
+      buf->advance(start - buf->tail());
+      buf->append(origLen);
 
-    return buf;
-  } else {
+      return buf;
+    }
+  }
+
+  {
     auto messageBeginBuf = folly::IOBuf::create(messageBeginSizeUpperBound);
     queue.append(std::move(messageBeginBuf));
     writer.setOutput(&queue);
     writer.writeMessageBegin(methodName, mtype, seqid);
+    if constexpr (std::is_same_v<ProtocolWriter, JSONProtocolWriter>) {
+      auto commaBuf = folly::IOBuf::copyBuffer(",");
+      queue.append(std::move(commaBuf));
+    }
     queue.append(std::move(buf));
+    // Append a closing parenthesis for JSON protocol
+    if constexpr (std::is_same_v<ProtocolWriter, JSONProtocolWriter>) {
+      writer.setOutput(&queue);
+      writer.writeMessageEnd();
+    }
     return queue.move();
   }
 
@@ -86,6 +100,10 @@ std::unique_ptr<folly::IOBuf> addEnvelope(
 
     case protocol::T_COMPACT_PROTOCOL:
       return addEnvelope<CompactProtocolWriter>(
+          mtype, seqid, methodName, std::move(buf));
+
+    case protocol::T_JSON_PROTOCOL:
+      return addEnvelope<JSONProtocolWriter>(
           mtype, seqid, methodName, std::move(buf));
     default:
       LOG(FATAL) << "Unsupported protocolId: " << protocolId;
@@ -222,6 +240,8 @@ std::unique_ptr<folly::IOBuf> LegacySerializedResponse::envelope(
       return makeEnvelope<BinaryProtocolWriter>(mtype, seqid, methodName);
     case protocol::T_COMPACT_PROTOCOL:
       return makeEnvelope<CompactProtocolWriter>(mtype, seqid, methodName);
+    case protocol::T_JSON_PROTOCOL:
+      return makeEnvelope<JSONProtocolWriter>(mtype, seqid, methodName);
     default:
       LOG(FATAL) << "Unsupported protocolId: " << protocolId;
   }
@@ -246,6 +266,13 @@ LegacySerializedResponse::extractPayload(
       }
       case protocol::T_COMPACT_PROTOCOL: {
         CompactProtocolReader iprot;
+        iprot.setInput(buffer.get());
+        iprot.readMessageBegin(methodName, mtype, _);
+        headerSize = iprot.getCursorPosition();
+        break;
+      }
+      case protocol::T_JSON_PROTOCOL: {
+        JSONProtocolReader iprot;
         iprot.setInput(buffer.get());
         iprot.readMessageBegin(methodName, mtype, _);
         headerSize = iprot.getCursorPosition();
@@ -280,6 +307,14 @@ LegacySerializedResponse::extractPayload(
           }
           case apache::thrift::protocol::T_COMPACT_PROTOCOL: {
             CompactProtocolWriter iprot;
+            const auto messageSize = iprot.serializedMessageSize(methodName);
+            resultQueue.preallocate(messageSize, messageSize);
+            iprot.setOutput(&resultQueue);
+            iprot.writeMessageBegin(methodName, mtype, seqId);
+            break;
+          }
+          case apache::thrift::protocol::T_JSON_PROTOCOL: {
+            JSONProtocolWriter iprot;
             const auto messageSize = iprot.serializedMessageSize(methodName);
             resultQueue.preallocate(messageSize, messageSize);
             iprot.setOutput(&resultQueue);

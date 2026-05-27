@@ -285,6 +285,12 @@ std::unique_ptr<folly::IOBuf> serializeError(
           CompactProtocolWriter,
           includeEnvelope>(obj, buf);
     }
+    case apache::thrift::protocol::T_JSON_PROTOCOL: {
+      return serializeErrorProtocol<
+          JSONProtocolReader,
+          JSONProtocolWriter,
+          includeEnvelope>(obj, buf);
+    }
     default: {
       LOG(ERROR) << "Invalid protocol from client";
     }
@@ -306,6 +312,10 @@ std::unique_ptr<folly::IOBuf> serializeError(
     }
     case apache::thrift::protocol::T_COMPACT_PROTOCOL: {
       return serializeErrorProtocol<CompactProtocolWriter, includeEnvelope>(
+          obj, fname, protoSeqId);
+    }
+    case apache::thrift::protocol::T_JSON_PROTOCOL: {
+      return serializeErrorProtocol<JSONProtocolWriter, includeEnvelope>(
           obj, fname, protoSeqId);
     }
     default: {

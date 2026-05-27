@@ -30,6 +30,7 @@
 #include <thrift/lib/cpp2/op/Get.h>
 #include <thrift/lib/cpp2/protocol/BinaryProtocol.h>
 #include <thrift/lib/cpp2/protocol/CompactProtocol.h>
+#include <thrift/lib/cpp2/protocol/JSONProtocol.h>
 #include <thrift/lib/cpp2/protocol/ProtocolReaderStructReadState.h>
 #include <thrift/lib/cpp2/protocol/SimpleJSONProtocol.h>
 #include <thrift/lib/cpp2/protocol/TableBasedSerializer.h>
@@ -43,6 +44,8 @@ class BinaryProtocolReader;
 class BinaryProtocolWriter;
 class ComapctProtocolReader;
 class CompactProtocolWriter;
+class JSONProtocolReader;
+class JSONProtocolWriter;
 class SimpleJSONProtocolReader;
 class SimpleJSONProtocolWriter;
 

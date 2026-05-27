@@ -522,7 +522,9 @@ unique_ptr<IOBuf> THeader::readHeaderFormat(
   // Untransform data section
   buf = untransform(std::move(buf), readTrans_);
 
-  if (protoId_ == T_JSON_PROTOCOL && clientType_ != THRIFT_HTTP_SERVER_TYPE) {
+  if (protoId_ == T_JSON_PROTOCOL && clientType_ != THRIFT_HTTP_SERVER_TYPE &&
+      clientType_ != THRIFT_HEADER_CLIENT_TYPE &&
+      clientType_ != THRIFT_ROCKET_CLIENT_TYPE) {
     throw TApplicationException(
         TApplicationException::UNSUPPORTED_CLIENT_TYPE,
         "Client is trying to send JSON without HTTP");
@@ -554,8 +556,14 @@ unique_ptr<IOBuf> THeader::untransform(
       case ZLIB_TRANSFORM:
         buf = decompressCodec(*buf, CodecType::ZLIB);
         break;
+      case SNAPPY_TRANSFORM:
+        buf = decompressCodec(*buf, CodecType::SNAPPY);
+        break;
       case ZSTD_TRANSFORM:
         buf = decompressCodec(*buf, CodecType::ZSTD);
+        break;
+      case LZ4_TRANSFORM:
+        buf = decompressCodec(*buf, CodecType::LZ4_FRAME);
         break;
       default:
         throw TApplicationException(
@@ -599,12 +607,26 @@ unique_ptr<IOBuf> THeader::transform(
         }
         buf = compressCodec(*buf, CodecType::ZLIB);
         break;
+      case SNAPPY_TRANSFORM:
+        if (dataSize < minCompressBytes) {
+          it = writeTrans.erase(it);
+          continue;
+        }
+        buf = compressCodec(*buf, CodecType::SNAPPY);
+        break;
       case ZSTD_TRANSFORM:
         if (dataSize < minCompressBytes) {
           it = writeTrans.erase(it);
           continue;
         }
         buf = compressCodec(*buf, CodecType::ZSTD, 1);
+        break;
+      case LZ4_TRANSFORM:
+        if (dataSize < minCompressBytes) {
+          it = writeTrans.erase(it);
+          continue;
+        }
+        buf = compressCodec(*buf, CodecType::LZ4_FRAME, 0);
         break;
       default:
         throw TTransportException(
@@ -825,7 +847,9 @@ unique_ptr<IOBuf> THeader::addHeader(
   }
   size_t chainSize = buf->computeChainDataLength();
 
-  if (protoId_ == T_JSON_PROTOCOL && clientType_ != THRIFT_HTTP_SERVER_TYPE) {
+  if (protoId_ == T_JSON_PROTOCOL && clientType_ != THRIFT_HTTP_SERVER_TYPE &&
+      clientType_ != THRIFT_HEADER_CLIENT_TYPE &&
+      clientType_ != THRIFT_ROCKET_CLIENT_TYPE) {
     throw TTransportException(
         TTransportException::BAD_ARGS, "Trying to send JSON without HTTP");
   }
@@ -1082,6 +1106,7 @@ static constexpr folly::StringPiece TRANSFORMS_STRING_LIST[] = {
     folly::StringPiece("snappy"),
     folly::StringPiece("qlz"),
     folly::StringPiece("zstd"),
+    folly::StringPiece("lz4"),
 };
 
 const folly::StringPiece THeader::getStringTransform(

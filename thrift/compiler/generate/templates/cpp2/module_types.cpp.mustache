@@ -177,6 +177,10 @@ template void <%struct:cpp_underlying_name%>::readNoXfer<>(apache::thrift::Compa
 template uint32_t <%struct:cpp_underlying_name%>::write<>(apache::thrift::CompactProtocolWriter*) const;
 template uint32_t <%struct:cpp_underlying_name%>::serializedSize<>(apache::thrift::CompactProtocolWriter const*) const;
 template uint32_t <%struct:cpp_underlying_name%>::serializedSizeZC<>(apache::thrift::CompactProtocolWriter const*) const;
+template void <%struct:cpp_underlying_name%>::readNoXfer<>(apache::thrift::JSONProtocolReader*);
+template uint32_t <%struct:cpp_underlying_name%>::write<>(apache::thrift::JSONProtocolWriter*) const;
+template uint32_t <%struct:cpp_underlying_name%>::serializedSize<>(apache::thrift::JSONProtocolWriter const*) const;
+template uint32_t <%struct:cpp_underlying_name%>::serializedSizeZC<>(apache::thrift::JSONProtocolWriter const*) const;
 <%#program:json?%>
 template void <%struct:cpp_underlying_name%>::readNoXfer<>(apache::thrift::SimpleJSONProtocolReader*);
 template uint32_t <%struct:cpp_underlying_name%>::write<>(apache::thrift::SimpleJSONProtocolWriter*) const;

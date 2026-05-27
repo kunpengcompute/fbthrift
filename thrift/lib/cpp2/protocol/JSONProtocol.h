@@ -63,7 +63,7 @@ class JSONProtocolWriter : public JSONProtocolWriterCommon {
    * Functions that return the serialized size
    */
 
-  inline uint32_t serializedMessageSize(const std::string& name) const;
+  inline uint32_t serializedMessageSize(folly::StringPiece name) const;
   inline uint32_t serializedFieldSize(
       const char* name, TType fieldType, int16_t fieldId) const;
   inline uint32_t serializedStructSize(const char* name) const;

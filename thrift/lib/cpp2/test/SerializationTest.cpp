@@ -70,6 +70,18 @@ TEST(SerializationTest, SimpleJSONSerializerRoundtripPasses) {
   EXPECT_EQ(out, s);
 }
 
+TEST(SerializationTest, JSONSerializerRoundtripPasses) {
+  auto s = makeTestStruct();
+
+  folly::IOBufQueue q;
+  JSONSerializer::serialize(s, &q);
+
+  TestStruct out;
+  JSONSerializer::deserialize(q.front(), out);
+
+  EXPECT_EQ(out, s);
+}
+
 TEST(SerializationTest, MixedRoundtripFails) {
   auto s = makeTestStruct();
 
@@ -312,6 +324,31 @@ TEST(SerializationTest, RecursiveDeepSimpleJSONSerializerRoundtripPasses) {
   EXPECT_EQ(s, out);
 }
 
+TEST(SerializationTest, RecursiveNoDepthJSONSerializerRoundtripPasses) {
+  auto s = makeTestStructRecursive(0);
+
+  folly::IOBufQueue q;
+  JSONSerializer::serialize(s, &q);
+
+  TestStructRecursive out;
+  JSONSerializer::deserialize(q.front(), out);
+
+  EXPECT_EQ(s, out);
+}
+
+TEST(SerializationTest, RecursiveDeepJSONSerializerRoundtripPasses) {
+  auto s = makeTestStructRecursive(6);
+  EXPECT_EQ(6, getRecDepth(s));
+
+  folly::IOBufQueue q;
+  JSONSerializer::serialize(s, &q);
+
+  TestStructRecursive out;
+  JSONSerializer::deserialize(q.front(), out);
+
+  EXPECT_EQ(s, out);
+}
+
 TEST(SerializationTest, StringOverloads) {
   auto s = makeTestStruct();
 
@@ -321,6 +358,19 @@ TEST(SerializationTest, StringOverloads) {
   {
     TestStruct out;
     CompactSerializer::deserialize(str, out);
+    EXPECT_EQ(out, s);
+  }
+}
+
+TEST(SerializationTest, JSONSerializerStringOverloads) {
+  auto s = makeTestStruct();
+
+  std::string str;
+  JSONSerializer::serialize(s, &str);
+
+  {
+    TestStruct out;
+    JSONSerializer::deserialize(str, out);
     EXPECT_EQ(out, s);
   }
 }
@@ -522,6 +572,108 @@ TEST(SerializationTest, UnsignedIntMap) {
 
   TestUnsignedIntMapStruct out;
   CompactSerializer::deserialize(q.front(), out);
+
+  EXPECT_EQ(out, s);
+}
+
+TEST(SerializationTest, JSONSerializerUnsignedIntStruct) {
+  TestUnsignedIntStruct s;
+
+  static_assert(
+      std::is_same<decltype(s.u8_ref())::value_type, uint8_t>::value,
+      "Unexpected type for s.u8");
+  static_assert(
+      std::is_same<decltype(s.u16_ref())::value_type, uint16_t>::value,
+      "Unexpected type for s.u16");
+  static_assert(
+      std::is_same<decltype(s.u32_ref())::value_type, uint32_t>::value,
+      "Unexpected type for s.u32");
+  static_assert(
+      std::is_same<decltype(s.u64_ref())::value_type, uint64_t>::value,
+      "Unexpected type for s.u64");
+
+  *s.u8_ref() = 128U;
+  *s.u16_ref() = 32768U;
+  *s.u32_ref() = 2147483648UL;
+  *s.u64_ref() = 9223372036854775808ULL;
+
+  folly::IOBufQueue q;
+  JSONSerializer::serialize(s, &q);
+
+  TestUnsignedIntStruct out;
+  JSONSerializer::deserialize(q.front(), out);
+
+  EXPECT_EQ(out, s);
+}
+
+TEST(SerializationTest, JSONSerializerUnsignedIntUnion) {
+  TestUnsignedIntUnion u;
+
+  static_assert(
+      std::is_same<decltype(u.get_u8()), const uint8_t&>::value,
+      "Unexpected return value type for u.get_u8()");
+  static_assert(
+      std::is_same<decltype(u.get_u16()), const uint16_t&>::value,
+      "Unexpected return value type for u.get_u16()");
+  static_assert(
+      std::is_same<decltype(u.get_u32()), const uint32_t&>::value,
+      "Unexpected return value type for u.get_u32()");
+  static_assert(
+      std::is_same<decltype(u.get_u64()), const uint64_t&>::value,
+      "Unexpected return value type for s.get_u64()");
+
+  u.u64_ref() = 9223372036854775808ULL;
+
+  folly::IOBufQueue q;
+  JSONSerializer::serialize(u, &q);
+
+  TestUnsignedIntUnion out;
+  JSONSerializer::deserialize(q.front(), out);
+
+  EXPECT_EQ(out, u);
+}
+
+TEST(SerializationTest, JSONSerializerUnsignedInt32ListStruct) {
+  TestUnsignedInt32ListStruct s;
+
+  static_assert(
+      std::is_same<decltype(s.l_ref())::value_type, std::vector<uint32_t>>::
+          value,
+      "Unexpected type for s.l");
+
+  s.l_ref()->push_back(1073741824UL);
+  s.l_ref()->push_back(2147483648UL);
+  s.l_ref()->push_back(3221225472UL);
+  s.l_ref()->push_back(4294967295UL);
+
+  folly::IOBufQueue q;
+  JSONSerializer::serialize(s, &q);
+
+  TestUnsignedInt32ListStruct out;
+  JSONSerializer::deserialize(q.front(), out);
+
+  EXPECT_EQ(out, s);
+}
+
+TEST(SerializationTest, JSONSerializerUnsignedIntMap) {
+  TestUnsignedIntMapStruct s;
+
+  static_assert(
+      std::is_same<
+          decltype(s.m_ref())::value_type,
+          std::map<uint32_t, uint64_t>>::value,
+      "Unexpected type for s.m");
+
+  s.m_ref()[1073741824UL] = 4611686018427387904ULL;
+  s.m_ref()[2147483648UL] = 9223372036854775808ULL;
+  s.m_ref()[3221225472UL] = 13835058055282163712ULL;
+  s.m_ref()[4294967295UL] = 18446744073709551615ULL;
+
+  folly::IOBufQueue q;
+  JSONSerializer::serialize(s, &q);
+
+  TestUnsignedIntMapStruct out;
+  JSONSerializer::deserialize(q.front(), out);
 
   EXPECT_EQ(out, s);
 }

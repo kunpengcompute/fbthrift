@@ -67,6 +67,16 @@ void <% > service_common/client_class_name%>::<%function:cpp_name%>Impl(apache::
       }
       break;
     }
+    case apache::thrift::protocol::T_JSON_PROTOCOL:
+    {
+      apache::thrift::JSONProtocolWriter writer;
+      if (stealRpcOptions) {
+        <%function:cpp_name%>T(&writer, std::move(rpcOptions), std::move(header), contextStack, std::move(callback)<%#function:creates_interaction?%>, handle<%/function:creates_interaction?%><%function:comma%><% > service_common/param_list%>);
+      } else {
+        <%function:cpp_name%>T(&writer, rpcOptions, std::move(header), contextStack, std::move(callback)<%#function:creates_interaction?%>, handle<%/function:creates_interaction?%><%function:comma%><% > service_common/param_list%>);
+      }
+      break;
+    }
     default:
     {
       apache::thrift::detail::ac::throw_app_exn("Could not find Protocol");

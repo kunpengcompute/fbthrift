@@ -90,6 +90,12 @@ void setCompressionCodec(
         case CodecConfig::Type::zstdConfig:
           metadata.compression_ref() = CompressionAlgorithm::ZSTD;
           break;
+        case CodecConfig::Type::snappyConfig:
+          metadata.compression_ref() = CompressionAlgorithm::SNAPPY;
+          break;
+        case CodecConfig::Type::lz4Config:
+          metadata.compression_ref() = CompressionAlgorithm::LZ4;
+          break;
         default:
           break;
       }
@@ -120,6 +126,12 @@ void compressPayload(
     case CompressionAlgorithm::ZLIB:
       codec = folly::io::CodecType::ZLIB;
       break;
+    case CompressionAlgorithm::SNAPPY:
+      codec = folly::io::CodecType::SNAPPY;
+      break;
+    case CompressionAlgorithm::LZ4:
+      codec = folly::io::CodecType::LZ4_FRAME;
+      break;
     case CompressionAlgorithm::NONE:
       codec = folly::io::CodecType::NO_COMPRESSION;
       break;
@@ -136,6 +148,12 @@ folly::Expected<std::unique_ptr<folly::IOBuf>, std::string> uncompressPayload(
       break;
     case CompressionAlgorithm::ZLIB:
       codec = folly::io::CodecType::ZLIB;
+      break;
+    case CompressionAlgorithm::SNAPPY:
+      codec = folly::io::CodecType::SNAPPY;
+      break;
+    case CompressionAlgorithm::LZ4:
+      codec = folly::io::CodecType::LZ4_FRAME;
       break;
     case CompressionAlgorithm::NONE:
       codec = folly::io::CodecType::NO_COMPRESSION;

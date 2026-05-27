@@ -249,7 +249,7 @@ uint32_t JSONProtocolWriter::writeBool(bool value) {
  */
 
 uint32_t JSONProtocolWriter::serializedMessageSize(
-    const std::string& name) const {
+    folly::StringPiece name) const {
   return 2 // list begin and end
       + serializedSizeI32() * 3 + serializedSizeString(name);
 }

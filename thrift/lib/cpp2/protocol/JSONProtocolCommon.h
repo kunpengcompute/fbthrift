@@ -93,7 +93,7 @@ class JSONProtocolWriterCommon : public detail::ProtocolBase {
 
   //  These writers are common to both json and simple-json protocols.
   uint32_t writeMessageBegin(
-      const std::string& name, MessageType messageType, int32_t seqid);
+      folly::StringPiece name, MessageType messageType, int32_t seqid);
   uint32_t writeMessageEnd();
   uint32_t writeByte(int8_t byte);
   uint32_t writeI16(int16_t i16);
@@ -317,6 +317,7 @@ class JSONProtocolReaderCommon : public detail::ProtocolBase {
   uint32_t skippedChars_{0};
   bool skippedIsUnread_{false};
   bool allowDecodeUTF8_{true};
+  bool messageBeginCalled_{false};
 };
 
 } // namespace thrift

@@ -29,6 +29,7 @@ Table of Contents
   * [Thrift Files](#thrift-files)
 * [C++ Static Reflection](#c-static-reflection)
 * [C++ Server Metrics](#c-server-metrics)
+* [Modifications](#modifications)
 
 
 ## About Thrift
@@ -155,6 +156,16 @@ Information regarding C++ Static Reflection support can be found under the [stat
 To collect runtime stats from a Thrift server, e.g. the number of active requests/connections, the C++ Thrift server supports an observer API that installs callbacks at a set of specific execution points in the server.
 
 To expose collected metrics out of the server process, one way is to use `fb303` interfaces, see [fb303 Github repo](https://github.com/facebook/fb303).
+
+---
+
+## Modifications
+
+Based on fbthrift `v2022.11.14.00`, the following modifications were made:
+
+- **JSON Serialization in RPC**: Added support for the native JSON protocol in RPC (Header/Rocket transport). The upstream only supports Binary and Compact protocols. Key changes include JSON context lifecycle management across reader instances, envelope construction/stripping adjustments for JSON's wrapping structure, and transport-layer protocol recognition.
+
+- **Snappy / LZ4 Compression**: Added Snappy and LZ4 compression support in multiple places where the upstream only handled ZLIB and ZSTD.
 
 ---
 

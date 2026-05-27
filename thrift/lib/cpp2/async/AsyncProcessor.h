@@ -636,8 +636,10 @@ class GeneratedAsyncProcessorBase : public AsyncProcessor {
   struct ProcessFuncs {
     ProcessFunc<Derived> compact;
     ProcessFunc<Derived> binary;
+    ProcessFunc<Derived> json;
     ExecuteFunc<Derived> compactExecute;
     ExecuteFunc<Derived> binaryExecute;
+    ExecuteFunc<Derived> jsonExecute;
   };
 
   template <typename ProcessFuncs>

@@ -19,7 +19,7 @@
 namespace apache {
 namespace thrift {
 
-constexpr std::array<CompressionAlgorithm, 2>
+constexpr std::array<CompressionAlgorithm, 4>
     ThriftParametersContext::supportedCompressionAlgos_;
 }
 } // namespace apache

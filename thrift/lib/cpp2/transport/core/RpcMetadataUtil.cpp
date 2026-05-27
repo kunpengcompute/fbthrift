@@ -136,6 +136,12 @@ void fillTHeaderFromResponseRpcMetadata(
       case apache::thrift::CompressionAlgorithm::ZLIB:
         transform = transport::THeader::ZLIB_TRANSFORM;
         break;
+      case apache::thrift::CompressionAlgorithm::SNAPPY:
+        transform = transport::THeader::SNAPPY_TRANSFORM;
+        break;
+      case apache::thrift::CompressionAlgorithm::LZ4:
+        transform = transport::THeader::LZ4_TRANSFORM;
+        break;
       default:
         transform = transport::THeader::NONE;
         break;

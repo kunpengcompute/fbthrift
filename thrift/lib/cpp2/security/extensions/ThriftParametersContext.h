@@ -33,10 +33,12 @@ class ThriftParametersContext {
   bool getUseStopTLS() { return useStopTLS_; }
 
  private:
-  static constexpr std::array<CompressionAlgorithm, 2>
+  static constexpr std::array<CompressionAlgorithm, 4>
       supportedCompressionAlgos_{{
           CompressionAlgorithm::ZSTD,
           CompressionAlgorithm::ZLIB,
+          CompressionAlgorithm::SNAPPY,
+          CompressionAlgorithm::LZ4,
       }};
   bool useStopTLS_{false};
 };

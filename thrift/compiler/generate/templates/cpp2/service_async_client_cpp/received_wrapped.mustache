@@ -73,6 +73,18 @@ folly::exception_wrapper <% > service_common/client_class_name%>::recv_wrapped_<
           &reader, state<%^type:void?%>, _return<%/type:void?%>);
       <%/type:sink?%>
     }
+    case apache::thrift::protocol::T_JSON_PROTOCOL:
+    {
+      apache::thrift::JSONProtocolReader reader;
+      <%#type:sink?%>
+      return apache::thrift::detail::ac::recv_wrapped<result, ExMapType, apache::thrift::JSONProtocolWriter>(
+          &reader, state<%^type:void?%>, state.extractSink(), _return<%/type:void?%>);
+      <%/type:sink?%>
+      <%^type:sink?%>
+      return apache::thrift::detail::ac::recv_wrapped<result>(
+          &reader, state<%^type:void?%>, _return<%/type:void?%>);
+      <%/type:sink?%>
+    }
     default:
     {
     }

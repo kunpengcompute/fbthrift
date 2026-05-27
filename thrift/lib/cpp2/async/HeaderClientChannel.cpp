@@ -243,6 +243,12 @@ void HeaderClientChannel::setRequestHeaderOptions(
           case CodecConfig::Type::zstdConfig:
             header->setTransform(THeader::ZSTD_TRANSFORM);
             break;
+          case CodecConfig::Type::snappyConfig:
+            header->setTransform(THeader::SNAPPY_TRANSFORM);
+            break;
+          case CodecConfig::Type::lz4Config:
+            header->setTransform(THeader::LZ4_TRANSFORM);
+            break;
           default:
             break;
         }

@@ -36,6 +36,9 @@ std::unique_ptr<folly::IOBuf> serializeErrorStruct(
     case apache::thrift::protocol::T_COMPACT_PROTOCOL: {
       return f(CompactProtocolWriter{});
     }
+    case apache::thrift::protocol::T_JSON_PROTOCOL: {
+      return f(JSONProtocolWriter{});
+    }
     default: {
       LOG(ERROR) << "Invalid protocol from client";
     }

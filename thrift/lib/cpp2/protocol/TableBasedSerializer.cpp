@@ -18,6 +18,7 @@
 
 #include <thrift/lib/cpp2/protocol/BinaryProtocol.h>
 #include <thrift/lib/cpp2/protocol/CompactProtocol.h>
+#include <thrift/lib/cpp2/protocol/JSONProtocol.h>
 #include <thrift/lib/cpp2/protocol/SimpleJSONProtocol.h>
 
 namespace apache {
@@ -86,6 +87,14 @@ template void read<BinaryProtocolReader>(
     BinaryProtocolReader* iprot, const StructInfo& structInfo, void* object);
 template size_t write<BinaryProtocolWriter>(
     BinaryProtocolWriter* iprot,
+    const StructInfo& structInfo,
+    const void* object);
+template void read<JSONProtocolReader>(
+    JSONProtocolReader* iprot,
+    const StructInfo& structInfo,
+    void* object);
+template size_t write<JSONProtocolWriter>(
+    JSONProtocolWriter* iprot,
     const StructInfo& structInfo,
     const void* object);
 template void read<SimpleJSONProtocolReader>(

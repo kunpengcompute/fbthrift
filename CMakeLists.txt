@@ -129,6 +129,8 @@ if(lib_only OR build_all)
   find_package(wangle CONFIG REQUIRED)
   find_package(ZLIB REQUIRED)
   find_package(Zstd REQUIRED)
+  find_package(Snappy REQUIRED)
+  find_package(LZ4 REQUIRED)
   # https://cmake.org/cmake/help/v3.9/module/FindThreads.html
   set(THREADS_PREFER_PTHREAD_FLAG ON)
   find_package(Threads)
@@ -139,7 +141,6 @@ if(lib_only OR build_all)
     ${ZSTD_INCLUDE_DIRS}
     ${Boost_INCLUDE_DIRS}
   )
-  add_definitions("-DTHRIFT_HAVE_LIBSNAPPY=0")
   if(lib_only)
     find_program(THRIFT1 thrift1)
     include(${THRIFT_COMPILER_INCLUDE}/thrift/ThriftLibrary.cmake)

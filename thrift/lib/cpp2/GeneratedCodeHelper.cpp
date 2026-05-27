@@ -31,6 +31,9 @@
 #include <thrift/lib/cpp2/type/TypeRegistry.h>
 #define THRIFT_ANY_AVAILABLE
 #endif
+#include <folly/ThreadLocal.h>
+#include <folly/stats/Histogram.h>
+#include <thrift/lib/cpp/transport/LatencyStatsFlags.h>
 
 using namespace std;
 using namespace folly;
@@ -38,6 +41,78 @@ using namespace apache::thrift::transport;
 
 namespace apache {
 namespace thrift {
+
+namespace {
+    constexpr int64_t kBucketSize = 10;
+    constexpr int64_t kMin = 0;
+    constexpr int64_t kMax = 100000;
+
+    struct ResponseDeserializationTag {};
+
+    folly::ThreadLocal<folly::Histogram<int64_t>, ResponseDeserializationTag> g_response_deserialization_hist{
+        []() { return new folly::Histogram<int64_t>(kBucketSize, kMin, kMax); }
+    };
+
+    double computeAvg(folly::ThreadLocal<folly::Histogram<int64_t>, ResponseDeserializationTag>& tl) {
+        folly::Histogram<int64_t> result(kBucketSize, kMin, kMax);
+        for (auto& item : tl.accessAllThreads()) {
+            result.merge(item);
+        }
+        uint64_t totalCount = result.computeTotalCount();
+        if (totalCount == 0) return 0.0;
+        int64_t totalSum = 0;
+        for (size_t i = 0; i < result.getNumBuckets(); ++i) {
+            totalSum += result.getBucketByIndex(i).sum;
+        }
+        return static_cast<double>(totalSum) / static_cast<double>(totalCount);
+    }
+
+    double getPercentile(folly::ThreadLocal<folly::Histogram<int64_t>, ResponseDeserializationTag>& tl, double pct) {
+        folly::Histogram<int64_t> result(kBucketSize, kMin, kMax);
+        for (auto& item : tl.accessAllThreads()) {
+            result.merge(item);
+        }
+        return static_cast<double>(result.getPercentileEstimate(pct));
+    }
+
+    void clearHist(folly::ThreadLocal<folly::Histogram<int64_t>, ResponseDeserializationTag>& tl) {
+        for (auto& item : tl.accessAllThreads()) {
+            item.clear();
+        }
+    }
+}
+
+void recordResponseDeserializationLatency(int64_t latencyUs) {
+    if (!apache::thrift::isLatencyStatsEnabled()) {
+        return;
+    }
+    g_response_deserialization_hist->addValue(latencyUs);
+}
+
+double getResponseDeserializationAvg() {
+    return computeAvg(g_response_deserialization_hist);
+}
+
+double getResponseDeserializationP50() {
+    return getPercentile(g_response_deserialization_hist, 0.5);
+}
+
+double getResponseDeserializationP90() {
+    return getPercentile(g_response_deserialization_hist, 0.9);
+}
+
+double getResponseDeserializationP99() {
+    return getPercentile(g_response_deserialization_hist, 0.99);
+}
+
+double getResponseDeserializationP999() {
+    return getPercentile(g_response_deserialization_hist, 0.999);
+}
+
+void resetResponseDeserializationStats() {
+    clearHist(g_response_deserialization_hist);
+}
+
 
 namespace detail {
 

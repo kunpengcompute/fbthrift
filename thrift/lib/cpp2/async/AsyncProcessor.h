@@ -67,6 +67,24 @@ class CancellableAsyncScope;
 namespace apache {
 namespace thrift {
 
+// 请求反序列化
+void recordRequestDeserializationLatency(int64_t latencyUs);
+double getRequestDeserializationAvg();
+double getRequestDeserializationP50();
+double getRequestDeserializationP90();
+double getRequestDeserializationP99();
+double getRequestDeserializationP999();
+void resetRequestDeserializationStats();
+
+// 响应序列化
+void recordResponseSerializationLatency(int64_t latencyUs);
+double getResponseSerializationAvg();
+double getResponseSerializationP50();
+double getResponseSerializationP90();
+double getResponseSerializationP99();
+double getResponseSerializationP999();
+void resetResponseSerializationStats();
+
 class ThriftServer;
 class ThriftServerStopController;
 
@@ -1483,7 +1501,13 @@ void GeneratedAsyncProcessorBase::deserializeRequest(
   }
   uint32_t bytes = 0;
   try {
+    auto start = std::chrono::steady_clock::now();
     bytes = apache::thrift::detail::deserializeRequestBody(&iprot, &args);
+    auto end = std::chrono::steady_clock::now();
+    auto latencyUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                            end - start)
+                        .count();
+    recordRequestDeserializationLatency(latencyUs);
     iprot.readMessageEnd();
   } catch (const std::exception& ex) {
     throw TrustedServerException::requestParsingError(ex.what());
@@ -1540,7 +1564,13 @@ Response GeneratedAsyncProcessorBase::serializeResponseImpl(
   if constexpr (std::is_same_v<Response, LegacySerializedResponse>) {
     prot->writeMessageBegin(method, MessageType::T_REPLY, protoSeqId);
   }
+  auto start = std::chrono::steady_clock::now();
   apache::thrift::detail::serializeResponseBody(prot, &result);
+  auto end = std::chrono::steady_clock::now();
+  auto latencyUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                            end - start)
+                        .count();
+  recordResponseSerializationLatency(latencyUs);
   if constexpr (std::is_same_v<Response, LegacySerializedResponse>) {
     prot->writeMessageEnd();
   }
@@ -1704,7 +1734,10 @@ void HandlerCallbackBase::putMessageInReplyQueue(
     eb->runInEventBaseThread(
         [reply = Reply(static_cast<A&&>(a)...)]() mutable { reply(); });
   } else {
+    // eb->runInEventBaseThread(
+    //     [reply = Reply(static_cast<A&&>(a)...)]() mutable { reply(); });
     getReplyQueue().putMessage(tag, static_cast<A&&>(a)...);
+    // eb->runInEventBaseThread([]{});
   }
 }
 

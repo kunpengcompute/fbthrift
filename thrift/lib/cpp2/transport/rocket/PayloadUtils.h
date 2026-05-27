@@ -37,6 +37,25 @@ struct RequestPayload {
 };
 
 namespace rocket {
+
+// ========== 新增：Rocket 压缩/解压统计 API 声明 ==========
+void recordRocketCompressionLatency(int64_t latencyUs);
+double getRocketCompressionAvg();
+double getRocketCompressionP50();
+double getRocketCompressionP90();
+double getRocketCompressionP99();
+double getRocketCompressionP999();
+void resetRocketCompressionStats();
+
+void recordRocketDecompressionLatency(int64_t latencyUs);
+double getRocketDecompressionAvg();
+double getRocketDecompressionP50();
+double getRocketDecompressionP90();
+double getRocketDecompressionP99();
+double getRocketDecompressionP999();
+void resetRocketDecompressionStats();
+// =========================================================
+
 namespace detail {
 template <class Metadata>
 Payload makePayload(
@@ -163,8 +182,14 @@ template <typename Payload, typename Metadata>
 rocket::Payload pack(const Metadata& metadata, Payload&& payload) {
   auto serializedPayload = packCompact(std::forward<Payload>(payload));
   if (auto compress = metadata.compression_ref()) {
+    auto start = std::chrono::steady_clock::now();
     apache::thrift::rocket::detail::compressPayload(
         serializedPayload, *compress);
+    auto end = std::chrono::steady_clock::now();
+    auto latencyUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        end - start).count();
+    if(*compress != CompressionAlgorithm::NONE)
+        recordRocketCompressionLatency(latencyUs);
   }
   return apache::thrift::rocket::detail::makePayload(
       metadata, std::move(serializedPayload));

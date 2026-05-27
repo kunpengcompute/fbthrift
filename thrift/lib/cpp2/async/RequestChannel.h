@@ -53,6 +53,18 @@ class IOBuf;
 namespace apache {
 namespace thrift {
 
+// 序列化耗时记录（由 fbthrift RequestChannel 调用）
+void recordRequestSerializationLatency(int64_t latencyUs);
+
+// 聚合查询 API
+double getRequestSerializationAvg();
+double getRequestSerializationP50();
+double getRequestSerializationP90();
+double getRequestSerializationP99();
+double getRequestSerializationP999();
+
+void resetRequestSerializationStats();
+
 class StreamClientCallback;
 class SinkClientCallback;
 class RequestChannel;
@@ -321,7 +333,12 @@ SerializedRequest preprocessSendT(
       if (ctx) {
         ctx->preWrite();
       }
+      auto start = std::chrono::steady_clock::now();
       writefunc(prot);
+      auto end = std::chrono::steady_clock::now();
+      auto latency = std::chrono::duration_cast<std::chrono::microseconds>(
+          end - start).count();
+      recordRequestSerializationLatency(latency);
       ::apache::thrift::SerializedMessage smsg;
       smsg.protocolType = prot->protocolType();
       smsg.buffer = queue.front();

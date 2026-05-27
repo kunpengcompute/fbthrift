@@ -35,10 +35,14 @@
 #include <thrift/lib/cpp/util/VarintUtils.h>
 #include <thrift/lib/cpp2/protocol/Serializer.h>
 #include <thrift/lib/cpp2/transport/rocket/framing/Util.h>
+#include <thrift/lib/cpp/transport/LatencyStatsFlags.h>
 
 #include <algorithm>
 #include <cassert>
 #include <string>
+
+#include <folly/ThreadLocal.h>
+#include <folly/stats/Histogram.h>
 
 using std::map;
 using std::pair;
@@ -50,6 +54,146 @@ using std::vector;
 namespace apache {
 namespace thrift {
 namespace transport {
+
+namespace {
+    constexpr int64_t kBucketSize = 10;
+    constexpr int64_t kMin = 0;
+    constexpr int64_t kMax = 100000;
+
+    // 定义唯一的 Tag 类型
+    struct HeaderCompressionTag {};
+    struct HeaderDecompressionTag {};
+
+    // 使用 Tag 的 ThreadLocal
+    folly::ThreadLocal<folly::Histogram<int64_t>, HeaderCompressionTag> g_header_compression_hist{
+        []() { return new folly::Histogram<int64_t>(kBucketSize, kMin, kMax); }
+    };
+
+    folly::ThreadLocal<folly::Histogram<int64_t>, HeaderDecompressionTag> g_header_decompression_hist{
+        []() { return new folly::Histogram<int64_t>(kBucketSize, kMin, kMax); }
+    };
+
+    double computeAvg(folly::ThreadLocal<folly::Histogram<int64_t>, HeaderCompressionTag>& tl) {
+        folly::Histogram<int64_t> result(kBucketSize, kMin, kMax);
+        for (auto& item : tl.accessAllThreads()) {
+            result.merge(item);
+        }
+        uint64_t totalCount = result.computeTotalCount();
+        if (totalCount == 0) return 0.0;
+        int64_t totalSum = 0;
+        for (size_t i = 0; i < result.getNumBuckets(); ++i) {
+            totalSum += result.getBucketByIndex(i).sum;
+        }
+        return static_cast<double>(totalSum) / static_cast<double>(totalCount);
+    }
+
+    double computeAvg(folly::ThreadLocal<folly::Histogram<int64_t>, HeaderDecompressionTag>& tl) {
+        folly::Histogram<int64_t> result(kBucketSize, kMin, kMax);
+        for (auto& item : tl.accessAllThreads()) {
+            result.merge(item);
+        }
+        uint64_t totalCount = result.computeTotalCount();
+        if (totalCount == 0) return 0.0;
+        int64_t totalSum = 0;
+        for (size_t i = 0; i < result.getNumBuckets(); ++i) {
+            totalSum += result.getBucketByIndex(i).sum;
+        }
+        return static_cast<double>(totalSum) / static_cast<double>(totalCount);
+    }
+
+    double getPercentile(folly::ThreadLocal<folly::Histogram<int64_t>, HeaderCompressionTag>& tl, double pct) {
+        folly::Histogram<int64_t> result(kBucketSize, kMin, kMax);
+        for (auto& item : tl.accessAllThreads()) {
+            result.merge(item);
+        }
+        return static_cast<double>(result.getPercentileEstimate(pct));
+    }
+
+    double getPercentile(folly::ThreadLocal<folly::Histogram<int64_t>, HeaderDecompressionTag>& tl, double pct) {
+        folly::Histogram<int64_t> result(kBucketSize, kMin, kMax);
+        for (auto& item : tl.accessAllThreads()) {
+            result.merge(item);
+        }
+        return static_cast<double>(result.getPercentileEstimate(pct));
+    }
+
+    void clearHist(folly::ThreadLocal<folly::Histogram<int64_t>, HeaderCompressionTag>& tl) {
+        for (auto& item : tl.accessAllThreads()) {
+            item.clear();
+        }
+    }
+
+    void clearHist(folly::ThreadLocal<folly::Histogram<int64_t>, HeaderDecompressionTag>& tl) {
+        for (auto& item : tl.accessAllThreads()) {
+            item.clear();
+        }
+    }
+}
+
+// ============ Compression ============
+void recordHeaderCompressionLatency(int64_t latencyUs) {
+    if (!apache::thrift::isLatencyStatsEnabled()) {
+        return;
+    }
+    g_header_compression_hist->addValue(latencyUs);
+}
+
+double getHeaderCompressionAvg() {
+    return computeAvg(g_header_compression_hist);
+}
+
+double getHeaderCompressionP50() {
+    return getPercentile(g_header_compression_hist, 0.5);
+}
+
+double getHeaderCompressionP90() {
+    return getPercentile(g_header_compression_hist, 0.9);
+}
+
+double getHeaderCompressionP99() {
+    return getPercentile(g_header_compression_hist, 0.99);
+}
+
+double getHeaderCompressionP999() {
+    return getPercentile(g_header_compression_hist, 0.999);
+}
+
+void resetHeaderCompressionStats() {
+    clearHist(g_header_compression_hist);
+}
+
+// ============ Decompression ============
+void recordHeaderDecompressionLatency(int64_t latencyUs) {
+    if (!apache::thrift::isLatencyStatsEnabled()) {
+        return;
+    }
+    g_header_decompression_hist->addValue(latencyUs);
+}
+
+double getHeaderDecompressionAvg() {
+    return computeAvg(g_header_decompression_hist);
+}
+
+double getHeaderDecompressionP50() {
+    return getPercentile(g_header_decompression_hist, 0.5);
+}
+
+double getHeaderDecompressionP90() {
+    return getPercentile(g_header_decompression_hist, 0.9);
+}
+
+double getHeaderDecompressionP99() {
+    return getPercentile(g_header_decompression_hist, 0.99);
+}
+
+double getHeaderDecompressionP999() {
+    return getPercentile(g_header_decompression_hist, 0.999);
+}
+
+void resetHeaderDecompressionStats() {
+    clearHist(g_header_decompression_hist);
+}
+
 namespace {
 const THeader::StringToStringMap& kEmptyMap() {
   static const THeader::StringToStringMap& map =
@@ -546,6 +690,7 @@ static unique_ptr<IOBuf> decompressCodec(
 
 unique_ptr<IOBuf> THeader::untransform(
     unique_ptr<IOBuf> buf, std::vector<uint16_t>& readTrans) {
+  auto start = std::chrono::steady_clock::now();
   for (vector<uint16_t>::const_reverse_iterator it = readTrans.rbegin();
        it != readTrans.rend();
        ++it) {
@@ -571,7 +716,11 @@ unique_ptr<IOBuf> THeader::untransform(
             fmt::format("Unknown transform: {}", transId));
     }
   }
-
+  auto end = std::chrono::steady_clock::now();
+  auto latencyUs = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+  if(!readTrans.empty()){
+      recordHeaderDecompressionLatency(latencyUs);
+  } 
   return buf;
 }
 
@@ -593,7 +742,7 @@ unique_ptr<IOBuf> THeader::transform(
     std::vector<uint16_t>& writeTrans,
     size_t minCompressBytes) {
   size_t dataSize = buf->computeChainDataLength();
-
+  auto start = std::chrono::steady_clock::now();
   for (vector<uint16_t>::iterator it = writeTrans.begin();
        it != writeTrans.end();) {
     using folly::io::CodecType;
@@ -635,7 +784,11 @@ unique_ptr<IOBuf> THeader::transform(
     }
     ++it;
   }
-
+  auto end = std::chrono::steady_clock::now();
+  auto latencyUs = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+  if(!writeTrans.empty()){
+      recordHeaderCompressionLatency(latencyUs);
+  } 
   return buf;
 }
 

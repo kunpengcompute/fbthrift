@@ -19,9 +19,151 @@
 #include <folly/io/async/EventBaseAtomicNotificationQueue.h>
 
 #include <thrift/lib/cpp2/async/ReplyInfo.h>
-
+#include <folly/ThreadLocal.h>
+#include <folly/stats/Histogram.h>
+#include <thrift/lib/cpp/transport/LatencyStatsFlags.h>
 namespace apache {
 namespace thrift {
+
+namespace {
+    constexpr int64_t kBucketSize = 10;
+    constexpr int64_t kMin = 0;
+    constexpr int64_t kMax = 100000;
+
+    // ============ Request Deserialization ============
+    struct RequestDeserializationTag {};
+
+    folly::ThreadLocal<folly::Histogram<int64_t>, RequestDeserializationTag> g_request_deserialization_hist{
+        []() { return new folly::Histogram<int64_t>(kBucketSize, kMin, kMax); }
+    };
+
+    double computeRequestDeserializationAvg(folly::ThreadLocal<folly::Histogram<int64_t>, RequestDeserializationTag>& tl) {
+        folly::Histogram<int64_t> result(kBucketSize, kMin, kMax);
+        for (auto& item : tl.accessAllThreads()) {
+            result.merge(item);
+        }
+        uint64_t totalCount = result.computeTotalCount();
+        if (totalCount == 0) return 0.0;
+        int64_t totalSum = 0;
+        for (size_t i = 0; i < result.getNumBuckets(); ++i) {
+            totalSum += result.getBucketByIndex(i).sum;
+        }
+        return static_cast<double>(totalSum) / static_cast<double>(totalCount);
+    }
+
+    double getRequestDeserializationPercentile(folly::ThreadLocal<folly::Histogram<int64_t>, RequestDeserializationTag>& tl, double pct) {
+        folly::Histogram<int64_t> result(kBucketSize, kMin, kMax);
+        for (auto& item : tl.accessAllThreads()) {
+            result.merge(item);
+        }
+        return static_cast<double>(result.getPercentileEstimate(pct));
+    }
+
+    void clearRequestDeserializationHist(folly::ThreadLocal<folly::Histogram<int64_t>, RequestDeserializationTag>& tl) {
+        for (auto& item : tl.accessAllThreads()) {
+            item.clear();
+        }
+    }
+
+    // ============ Response Serialization ============
+    struct ResponseSerializationTag {};
+
+    folly::ThreadLocal<folly::Histogram<int64_t>, ResponseSerializationTag> g_response_serialization_hist{
+        []() { return new folly::Histogram<int64_t>(kBucketSize, kMin, kMax); }
+    };
+
+    double computeResponseSerializationAvg(folly::ThreadLocal<folly::Histogram<int64_t>, ResponseSerializationTag>& tl) {
+        folly::Histogram<int64_t> result(kBucketSize, kMin, kMax);
+        for (auto& item : tl.accessAllThreads()) {
+            result.merge(item);
+        }
+        uint64_t totalCount = result.computeTotalCount();
+        if (totalCount == 0) return 0.0;
+        int64_t totalSum = 0;
+        for (size_t i = 0; i < result.getNumBuckets(); ++i) {
+            totalSum += result.getBucketByIndex(i).sum;
+        }
+        return static_cast<double>(totalSum) / static_cast<double>(totalCount);
+    }
+
+    double getResponseSerializationPercentile(folly::ThreadLocal<folly::Histogram<int64_t>, ResponseSerializationTag>& tl, double pct) {
+        folly::Histogram<int64_t> result(kBucketSize, kMin, kMax);
+        for (auto& item : tl.accessAllThreads()) {
+            result.merge(item);
+        }
+        return static_cast<double>(result.getPercentileEstimate(pct));
+    }
+
+    void clearResponseSerializationHist(folly::ThreadLocal<folly::Histogram<int64_t>, ResponseSerializationTag>& tl) {
+        for (auto& item : tl.accessAllThreads()) {
+            item.clear();
+        }
+    }
+}
+
+// ============ Request Deserialization API ============
+void recordRequestDeserializationLatency(int64_t latencyUs) {
+    if (!apache::thrift::isLatencyStatsEnabled()) {
+        return;
+    }
+    g_request_deserialization_hist->addValue(latencyUs);
+}
+
+double getRequestDeserializationAvg() {
+    return computeRequestDeserializationAvg(g_request_deserialization_hist);
+}
+
+double getRequestDeserializationP50() {
+    return getRequestDeserializationPercentile(g_request_deserialization_hist, 0.5);
+}
+
+double getRequestDeserializationP90() {
+    return getRequestDeserializationPercentile(g_request_deserialization_hist, 0.9);
+}
+
+double getRequestDeserializationP99() {
+    return getRequestDeserializationPercentile(g_request_deserialization_hist, 0.99);
+}
+
+double getRequestDeserializationP999() {
+    return getRequestDeserializationPercentile(g_request_deserialization_hist, 0.999);
+}
+
+void resetRequestDeserializationStats() {
+    clearRequestDeserializationHist(g_request_deserialization_hist);
+}
+
+// ============ Response Serialization API ============
+void recordResponseSerializationLatency(int64_t latencyUs) {
+    if (!apache::thrift::isLatencyStatsEnabled()) {
+        return;
+    }
+    g_response_serialization_hist->addValue(latencyUs);
+}
+
+double getResponseSerializationAvg() {
+    return computeResponseSerializationAvg(g_response_serialization_hist);
+}
+
+double getResponseSerializationP50() {
+    return getResponseSerializationPercentile(g_response_serialization_hist, 0.5);
+}
+
+double getResponseSerializationP90() {
+    return getResponseSerializationPercentile(g_response_serialization_hist, 0.9);
+}
+
+double getResponseSerializationP99() {
+    return getResponseSerializationPercentile(g_response_serialization_hist, 0.99);
+}
+
+double getResponseSerializationP999() {
+    return getResponseSerializationPercentile(g_response_serialization_hist, 0.999);
+}
+
+void resetResponseSerializationStats() {
+    clearResponseSerializationHist(g_response_serialization_hist);
+}
 
 constexpr std::chrono::seconds ServerInterface::BlockingThreadManager::kTimeout;
 thread_local RequestParams ServerInterface::requestParams_;

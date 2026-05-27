@@ -59,6 +59,7 @@ add_library(
   transport/TSocket.cpp
   transport/TBufferTransports.cpp
   transport/THeader.cpp
+  transport/LatencyStatsFlags.cpp
   transport/TZlibTransport.cpp
   ../cpp2/transport/rocket/framing/Util.cpp
   util/PausableTimer.cpp

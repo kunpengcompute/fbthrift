@@ -18,7 +18,7 @@ fbthrift序列化优化补丁仓已优化和新增的函数如[**表1** fbthrift
 
 ## 函数定义
 
-### Compact Protocol 接口
+### Compact Protocol接口
 
 #### writeI32List（Compact Protocol）
 
@@ -141,7 +141,7 @@ bool hasRuntimeSve2();
 |true|当前CPU支持SVE2指令集|
 |false|当前CPU不支持SVE2指令集|
 
-### Binary Protocol 接口
+### Binary Protocol接口
 
 #### writeI16List（Binary Protocol）
 
@@ -241,7 +241,7 @@ void writeBeContiguous(folly::io::QueueAppender& out, const T* data, uint32_t si
 
 ## 编译期分发机制
 
-优化方案通过SFINAE（Substitution Failure Is Not An Error）技术在编译期自动选择最优序列化路径。当以下所有条件同时满足时，才会走批量处理API：
+优化方案通过SFINAE（Substitution Failure Is Not An Error）技术在编译期自动选择最优序列化路径。当以下所有条件同时满足时，才会走批量处理API.
 
 - **元素类型**：必须是`int16_t`、`int32_t`或`int64_t`。
 - **协议支持**：`has_batched_int_list_writer<Protocol, Elem>`为true，即Protocol必须提供`writeI{N}List`成员（目前仅`CompactProtocolWriter`和`BinaryProtocolWriter`满足，`JSONProtocolWriter`在编译期被剔除）。

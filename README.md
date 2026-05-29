@@ -1,8 +1,8 @@
-# fbthrift 序列化优化补丁仓介绍
+# fbthrift序列化优化介绍
 
 ## 最新消息
 
-- 2026-06-30：发布补丁仓v1.0.0版本，针对fbthrift序列化框架进行整型数组批量编码优化，通过ARM SVE2指令集和编译器自动向量化技术显著提升序列化性能。
+- [2026-06-30]：基于Meta开源的fbthrift序列化发布补丁仓v1.0.0版本。针对fbthrift序列化框架进行整型数组批量编码优化，通过ARM SVE2指令集和编译器自动向量化技术显著提升序列化性能。
 
 ## 项目介绍
 
@@ -22,8 +22,8 @@ fbthrift是Meta开源的高性能RPC框架和序列化库，广泛应用于分�
 fbthrift/
 ├── docs/                           # 文档目录
 │   ├── zh/                         # 中文文档
-│   │   ├── api.md                  # API参考文档
-│   │   ├── quick_start.md          # 快速入门文档
+│   │   ├── api_reference.md        # API参考
+│   │   ├── quick_start.md          # 快速入门
 │   │   └── release_notes.md        # 版本说明书
 │   └── LICENSE
 ├── LICENSE
@@ -32,19 +32,19 @@ fbthrift/
 
 ## 版本说明
 
-详见[版本说明书](docs/zh/release_notes.md)
+关于fbthrift序列化优化补丁仓的版本发布情况请参见《[版本说明书](docs/zh/release_notes.md)》。
 
 ## 快速上手
 
-详见[快速入门](docs/zh/quick_start.md)
+fbthrift序列化优化补丁的编译安装和测试指导请参见《[快速入门](docs/zh/quick_start.md)》
 
 ## 文档
 
 | 资源名称 | 资源简介 |
 |---------|---------|
-| [快速入门](docs/zh/quick_start.md) | 提供fbthrift序列化优化的编译安装和测试指导。 |
-| [版本说明书](docs/zh/release_notes.md) | 提供fbthrift序列化优化版本的基础信息和特性更新信息。 |
-| [API参考](docs/zh/api.md) | 提供优化后的接口说明及相关改动。 |
+| [快速入门](docs/zh/quick_start.md) | 提供fbthrift序列化优化补丁仓的编译安装和测试指导。 |
+| [版本说明书](docs/zh/release_notes.md) | 提供fbthrift序列化优化补丁仓的版本基础信息和更新信息。 |
+| [API参考](docs/zh/api_reference.md) | 提供fbthrift序列化优化后的接口说明及相关改动。 |
 
 ## 免责声明
 

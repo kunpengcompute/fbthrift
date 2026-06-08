@@ -15,10 +15,153 @@
  */
 
 #include <thrift/lib/cpp2/transport/rocket/PayloadUtils.h>
+#include <folly/ThreadLocal.h>
+#include <folly/stats/Histogram.h>
+#include <thrift/lib/cpp/transport/LatencyStatsFlags.h>
 
 namespace apache {
 namespace thrift {
 namespace rocket {
+
+namespace {
+    constexpr int64_t kBucketSize = 10;
+    constexpr int64_t kMin = 0;
+    constexpr int64_t kMax = 100000;
+
+    // 定义唯一的 Tag 类型
+    struct RocketCompressionTag {};
+    struct RocketDecompressionTag {};
+
+    // 使用 Tag 的 ThreadLocal
+    folly::ThreadLocal<folly::Histogram<int64_t>, RocketCompressionTag> g_rocket_compression_hist{
+        []() { return new folly::Histogram<int64_t>(kBucketSize, kMin, kMax); }
+    };
+
+    folly::ThreadLocal<folly::Histogram<int64_t>, RocketDecompressionTag> g_rocket_decompression_hist{
+        []() { return new folly::Histogram<int64_t>(kBucketSize, kMin, kMax); }
+    };
+
+    double computeAvg(folly::ThreadLocal<folly::Histogram<int64_t>, RocketCompressionTag>& tl) {
+        folly::Histogram<int64_t> result(kBucketSize, kMin, kMax);
+        for (auto& item : tl.accessAllThreads()) {
+            result.merge(item);
+        }
+        uint64_t totalCount = result.computeTotalCount();
+        if (totalCount == 0) return 0.0;
+        int64_t totalSum = 0;
+        for (size_t i = 0; i < result.getNumBuckets(); ++i) {
+            totalSum += result.getBucketByIndex(i).sum;
+        }
+        return static_cast<double>(totalSum) / static_cast<double>(totalCount);
+    }
+
+    double computeAvg(folly::ThreadLocal<folly::Histogram<int64_t>, RocketDecompressionTag>& tl) {
+        folly::Histogram<int64_t> result(kBucketSize, kMin, kMax);
+        for (auto& item : tl.accessAllThreads()) {
+            result.merge(item);
+        }
+        uint64_t totalCount = result.computeTotalCount();
+        if (totalCount == 0) return 0.0;
+        int64_t totalSum = 0;
+        for (size_t i = 0; i < result.getNumBuckets(); ++i) {
+            totalSum += result.getBucketByIndex(i).sum;
+        }
+        return static_cast<double>(totalSum) / static_cast<double>(totalCount);
+    }
+
+    double getPercentile(folly::ThreadLocal<folly::Histogram<int64_t>, RocketCompressionTag>& tl, double pct) {
+        folly::Histogram<int64_t> result(kBucketSize, kMin, kMax);
+        for (auto& item : tl.accessAllThreads()) {
+            result.merge(item);
+        }
+        return static_cast<double>(result.getPercentileEstimate(pct));
+    }
+
+    double getPercentile(folly::ThreadLocal<folly::Histogram<int64_t>, RocketDecompressionTag>& tl, double pct) {
+        folly::Histogram<int64_t> result(kBucketSize, kMin, kMax);
+        for (auto& item : tl.accessAllThreads()) {
+            result.merge(item);
+        }
+        return static_cast<double>(result.getPercentileEstimate(pct));
+    }
+
+    void clearHist(folly::ThreadLocal<folly::Histogram<int64_t>, RocketCompressionTag>& tl) {
+        for (auto& item : tl.accessAllThreads()) {
+            item.clear();
+        }
+    }
+
+    void clearHist(folly::ThreadLocal<folly::Histogram<int64_t>, RocketDecompressionTag>& tl) {
+        for (auto& item : tl.accessAllThreads()) {
+            item.clear();
+        }
+    }
+}
+
+// ============ Compression ============
+void recordRocketCompressionLatency(int64_t latencyUs) {
+    if (!apache::thrift::isLatencyStatsEnabled()) {
+        return;
+    }
+    g_rocket_compression_hist->addValue(latencyUs);
+}
+
+double getRocketCompressionAvg() {
+    return computeAvg(g_rocket_compression_hist);
+}
+
+double getRocketCompressionP50() {
+    return getPercentile(g_rocket_compression_hist, 0.5);
+}
+
+double getRocketCompressionP90() {
+    return getPercentile(g_rocket_compression_hist, 0.9);
+}
+
+double getRocketCompressionP99() {
+    return getPercentile(g_rocket_compression_hist, 0.99);
+}
+
+double getRocketCompressionP999() {
+    return getPercentile(g_rocket_compression_hist, 0.999);
+}
+
+void resetRocketCompressionStats() {
+    clearHist(g_rocket_compression_hist);
+}
+
+// ============ Decompression ============
+void recordRocketDecompressionLatency(int64_t latencyUs) {
+    if (!apache::thrift::isLatencyStatsEnabled()) {
+        return;
+    }
+    g_rocket_decompression_hist->addValue(latencyUs);
+}
+
+double getRocketDecompressionAvg() {
+    return computeAvg(g_rocket_decompression_hist);
+}
+
+double getRocketDecompressionP50() {
+    return getPercentile(g_rocket_decompression_hist, 0.5);
+}
+
+double getRocketDecompressionP90() {
+    return getPercentile(g_rocket_decompression_hist, 0.9);
+}
+
+double getRocketDecompressionP99() {
+    return getPercentile(g_rocket_decompression_hist, 0.99);
+}
+
+double getRocketDecompressionP999() {
+    return getPercentile(g_rocket_decompression_hist, 0.999);
+}
+
+void resetRocketDecompressionStats() {
+    clearHist(g_rocket_decompression_hist);
+}
+
 namespace detail {
 
 template <class Metadata>
@@ -169,7 +312,13 @@ folly::Expected<std::unique_ptr<folly::IOBuf>, std::string> uncompressPayload(
 } // namespace detail
 std::unique_ptr<folly::IOBuf> uncompressBuffer(
     std::unique_ptr<folly::IOBuf>&& buffer, CompressionAlgorithm compression) {
+  auto start = std::chrono::steady_clock::now();
   auto result = detail::uncompressPayload(compression, std::move(buffer));
+  auto end = std::chrono::steady_clock::now();
+  auto latencyUs = std::chrono::duration_cast<std::chrono::microseconds>(
+      end - start).count();
+  if(compression != CompressionAlgorithm::NONE)
+      recordRocketDecompressionLatency(latencyUs);
   if (!result) {
     folly::throw_exception<TApplicationException>(
         TApplicationException::INVALID_TRANSFORM,

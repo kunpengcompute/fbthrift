@@ -76,6 +76,24 @@ namespace apache {
 namespace thrift {
 namespace transport {
 
+// 压缩统计
+void recordHeaderCompressionLatency(int64_t latencyUs);
+double getHeaderCompressionAvg();
+double getHeaderCompressionP50();
+double getHeaderCompressionP90();
+double getHeaderCompressionP99();
+double getHeaderCompressionP999();
+void resetHeaderCompressionStats();
+
+// 解压缩统计
+void recordHeaderDecompressionLatency(int64_t latencyUs);
+double getHeaderDecompressionAvg();
+double getHeaderDecompressionP50();
+double getHeaderDecompressionP90();
+double getHeaderDecompressionP99();
+double getHeaderDecompressionP999();
+void resetHeaderDecompressionStats();
+
 namespace detail {
 /**
  * This is a helper class to facilitate transport upgrade from header to rocket

@@ -54,6 +54,16 @@
 namespace apache {
 namespace thrift {
 
+void recordResponseDeserializationLatency(int64_t latencyUs);
+
+double getResponseDeserializationAvg();
+double getResponseDeserializationP50();
+double getResponseDeserializationP90();
+double getResponseDeserializationP99();
+double getResponseDeserializationP999();
+
+void resetResponseDeserializationStats();
+
 class BinaryProtocolReader;
 class CompactProtocolReader;
 class JSONProtocolReader;
@@ -472,7 +482,15 @@ folly::exception_wrapper recv_wrapped_helper(
     if (ctx) {
       ctx->onReadData(smsg);
     }
+    
+    auto start = std::chrono::steady_clock::now();
     apache::thrift::detail::deserializeRequestBody(prot, &result);
+    auto end = std::chrono::steady_clock::now();
+    auto latencyUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                            end - start)
+                            .count();
+    recordResponseDeserializationLatency(latencyUs);
+
     if (ctx) {
       ctx->postRead(
           state.header(), folly::to_narrow(buffer.computeChainDataLength()));

@@ -15,9 +15,85 @@
  */
 
 #include <thrift/lib/cpp2/async/RequestChannel.h>
+#include <folly/ThreadLocal.h>
+#include <folly/stats/Histogram.h>
+#include <thrift/lib/cpp/transport/LatencyStatsFlags.h>
 
 namespace apache {
 namespace thrift {
+
+namespace {
+    constexpr int64_t kBucketSize = 10;
+    constexpr int64_t kMin = 0;
+    constexpr int64_t kMax = 100000;
+
+    struct RequestSerializationTag {};
+
+    folly::ThreadLocal<folly::Histogram<int64_t>, RequestSerializationTag> g_request_serialization_hist{
+        []() { return new folly::Histogram<int64_t>(kBucketSize, kMin, kMax); }
+    };
+
+    double computeAvg(folly::ThreadLocal<folly::Histogram<int64_t>, RequestSerializationTag>& tl) {
+        folly::Histogram<int64_t> result(kBucketSize, kMin, kMax);
+        for (auto& item : tl.accessAllThreads()) {
+            result.merge(item);
+        }
+        uint64_t totalCount = result.computeTotalCount();
+        if (totalCount == 0) return 0.0;
+        int64_t totalSum = 0;
+        for (size_t i = 0; i < result.getNumBuckets(); ++i) {
+            totalSum += result.getBucketByIndex(i).sum;
+        }
+        return static_cast<double>(totalSum) / static_cast<double>(totalCount);
+    }
+
+    double getPercentile(folly::ThreadLocal<folly::Histogram<int64_t>, RequestSerializationTag>& tl, double pct) {
+        folly::Histogram<int64_t> result(kBucketSize, kMin, kMax);
+        for (auto& item : tl.accessAllThreads()) {
+            result.merge(item);
+        }
+        return static_cast<double>(result.getPercentileEstimate(pct));
+    }
+
+    void clearHist(folly::ThreadLocal<folly::Histogram<int64_t>, RequestSerializationTag>& tl) {
+        for (auto& item : tl.accessAllThreads()) {
+            item.clear();
+        }
+    }
+}
+
+void recordRequestSerializationLatency(int64_t latencyUs) {
+    if (!apache::thrift::isLatencyStatsEnabled()) {
+        return;
+    }
+    g_request_serialization_hist->addValue(latencyUs);
+}
+
+double getRequestSerializationAvg() {
+    return computeAvg(g_request_serialization_hist);
+}
+
+double getRequestSerializationP50() {
+    return getPercentile(g_request_serialization_hist, 0.5);
+}
+
+double getRequestSerializationP90() {
+    return getPercentile(g_request_serialization_hist, 0.9);
+}
+
+double getRequestSerializationP99() {
+    return getPercentile(g_request_serialization_hist, 0.99);
+}
+
+double getRequestSerializationP999() {
+    return getPercentile(g_request_serialization_hist, 0.999);
+}
+
+void resetRequestSerializationStats() {
+    clearHist(g_request_serialization_hist);
+}
+
+
 void RequestChannel::sendRequestResponse(
     const RpcOptions& rpcOptions,
     MethodMetadata&& metadata,

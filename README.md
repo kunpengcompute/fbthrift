@@ -1,14 +1,14 @@
-# fbthrift序列化优化介绍
+# FbThrift序列化优化介绍
 
 ## 最新消息
 
-- [2026.06.30]：基于Meta开源的fbthrift序列化发布补丁仓v1.0.0版本。针对fbthrift序列化框架进行整型数组批量编码优化，通过ARM SVE2指令集和编译器自动向量化技术显著提升序列化性能。
+- [2026.06.30]：基于Meta开源的FbThrift序列化发布补丁仓v1.0.0版本。针对FbThrift序列化框架进行整型数组批量编码优化，通过ARM SVE2指令集和编译器自动向量化技术显著提升序列化性能。
 
 ## 项目介绍
 
-fbthrift是Meta开源的高性能RPC框架和序列化库，广泛应用于分布式系统和微服务架构中。它支持多种语言（如C++、Java、Python等），序列化部分提供了丰富的序列化协议（如Compact Protocol、Binary Protocol等）。
+FbThrift是Meta开源的高性能RPC框架和序列化库，广泛应用于分布式系统和微服务架构中。它支持多种语言（如C++、Java、Python等），序列化部分提供了丰富的序列化协议（如Compact Protocol、Binary Protocol等）。
 
-本项目是针对fbthrift序列化框架的优化仓库，聚焦于连续整型数组（如`list<int32_t>`、`list<int64_t>`）的序列化性能优化。fbthrift默认采用逐元素（per-element）的编码与解码，这种方式存在较强的数据依赖，难以被编译器自动向量化（SIMD），导致序列化性能在处理大规模数组时成为瓶颈。
+本项目是针对FbThrift序列化框架的优化仓库，聚焦于连续整型数组（如`list<int32_t>`、`list<int64_t>`）的序列化性能优化。FbThrift默认采用逐元素（per-element）的编码与解码，这种方式存在较强的数据依赖，难以被编译器自动向量化（SIMD），导致序列化性能在处理大规模数组时成为瓶颈。
 
 本优化方案的核心思路：
 
@@ -27,32 +27,33 @@ fbthrift/
 │   │   └── release_notes.md        # 版本说明书
 │   └── LICENSE
 ├── LICENSE
-└── README.md
+├── fbthrift_opt_simd.patch         # FbThrift序列化优化补丁文件
+└── README.md                       # 项目介绍
 ```
 
 ## 版本说明
 
-关于fbthrift序列化优化补丁仓的版本发布情况请参见《[版本说明书](docs/zh/release_notes.md)》。
+关于FbThrift序列化优化补丁仓的版本发布情况请参见《[版本说明书](docs/zh/release_notes.md)》。
 
 ## 快速上手
 
-fbthrift序列化优化补丁的编译安装和测试指导请参见《[快速入门](docs/zh/quick_start.md)》
+FbThrift序列化优化补丁的编译安装和测试指导请参见《[快速入门](docs/zh/quick_start.md)》
 
 ## 文档
 
 | 资源名称 | 资源简介 |
 |---------|---------|
-| [快速入门](docs/zh/quick_start.md) | 提供fbthrift序列化优化补丁仓的编译安装和测试指导。 |
-| [版本说明书](docs/zh/release_notes.md) | 提供fbthrift序列化优化补丁仓的版本基础信息和更新信息。 |
-| [API参考](docs/zh/api_reference.md) | 提供fbthrift序列化优化后的接口说明及相关改动。 |
+| [快速入门](docs/zh/quick_start.md) | 提供FbThrift序列化优化补丁仓的编译安装和测试指导。 |
+| [版本说明书](docs/zh/release_notes.md) | 提供FbThrift序列化优化补丁仓的版本基础信息和更新信息。 |
+| [API参考](docs/zh/api_reference.md) | 提供FbThrift序列化优化后的接口说明及相关改动。 |
 
 ## 免责声明
 
-此代码仓计划参与fbthrift软件开源，仅对fbthrift序列化部分函数进行性能优化，编码风格遵照原生开源软件，继承原生开源软件安全设计，不破坏原生开源软件设计及编码风格和方式，软件的任何漏洞与安全问题，均由相应的上游社区根据其漏洞和安全响应机制解决。请密切关注上游社区发布的通知和版本更新。对软件的漏洞及安全问题不承担任何责任。
+此代码仓计划参与FbThrift软件开源，仅对FbThrift序列化部分函数进行性能优化，编码风格遵照原生开源软件，继承原生开源软件安全设计，不破坏原生开源软件设计及编码风格和方式，软件的任何漏洞与安全问题，均由相应的上游社区根据其漏洞和安全响应机制解决。请密切关注上游社区发布的通知和版本更新。对软件的漏洞及安全问题不承担任何责任。
 
 ## License
 
-fbthrift遵循 Apache-2.0许可证，具体请参见[LICENSE文件](LICENSE)。
+FbThrift遵循 Apache-2.0许可证，具体请参见[LICENSE文件](LICENSE)。
 
 本项目的文档适用CC-BY 4.0许可证，具体请参见[LICENSE文件](docs/LICENSE)。
 
@@ -66,8 +67,8 @@ fbthrift遵循 Apache-2.0许可证，具体请参见[LICENSE文件](LICENSE)。
 
 ## 致谢
 
-fbthrift补丁仓由华为公司的下列部门联合贡献：
+FbThrift补丁仓由华为公司的下列部门联合贡献：
 
 鲲鹏计算Boostkit开发部
 
-感谢来自社区的每一个PR，欢迎贡献fbthrift补丁仓！
+感谢来自社区的每一个PR，欢迎贡献FbThrift补丁仓！

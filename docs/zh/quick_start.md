@@ -67,7 +67,7 @@
       ```bash
       wget https://archives.boost.io/release/1.78.0/source/boost_1_78_0.tar.gz
       tar xzf boost_1_78_0.tar.gz && cd boost_1_78_0
-      ./bootstrap.sh --with-toolset=clang --prefix=/usr/local/boost_1_81_0
+      ./bootstrap.sh --with-toolset=clang --prefix=/usr/local/boost_1_78_0
       ./b2 install
       ```
 
@@ -138,8 +138,8 @@
 
    > **说明：**
    > - `-DTHRIFT_ENABLE_ARM_SVE2=ON`：启用Compact Protocol的SVE2优化。若目标CPU不支持SVE2，可省略此选项，此时仅Binary Protocol优化生效，Compact Protocol回退到scalar路径。
-   > - `DCMAKE_INSTALL_PREFIX`可替换为自定义的FbThrift安装目的地址。
-   > - 各`Dxxx_DIR`参数需替换为实际安装路径。
+   > - `-DCMAKE_INSTALL_PREFIX`可替换为自定义的FbThrift安装目的地址。
+   > - 各`-Dxxx_DIR`参数需替换为实际安装路径。
 
 ## 性能基准测试（Benchmark）
 

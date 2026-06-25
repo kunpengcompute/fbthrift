@@ -67,7 +67,7 @@ This solution optimizes batch integer array encoding for fbthrift's Compact Prot
       ```bash
       wget https://archives.boost.io/release/1.78.0/source/boost_1_78_0.tar.gz
       tar xzf boost_1_78_0.tar.gz && cd boost_1_78_0
-      ./bootstrap.sh --with-toolset=clang --prefix=/usr/local/boost_1_81_0
+      ./bootstrap.sh --with-toolset=clang --prefix=/usr/local/boost_1_78_0
       ./b2 install
       ```
 
@@ -89,8 +89,8 @@ This solution optimizes batch integer array encoding for fbthrift's Compact Prot
    ```
 
    > **NOTE**
-   > - You can set `DCMAKE_INSTALL_PREFIX` to a custom folly installation destination.
-   > - You can set `DCMAKE_PREFIX_PATH` to the location where a dependency package is installed, for example, the CMake path for installing fmt.
+   > - You can set `-DCMAKE_INSTALL_PREFIX` to a custom folly installation destination.
+   > - You can set `-CMAKE_PREFIX_PATH` to the location where a dependency package is installed, for example, the CMake path for installing fmt.
 
 5. Compile fizz.
 
@@ -138,8 +138,8 @@ This solution optimizes batch integer array encoding for fbthrift's Compact Prot
 
    > **NOTE**
    > - `-DTHRIFT_ENABLE_ARM_SVE2=ON`: Enables the SVE2 optimization for the Compact Protocol. If the target CPU does not support SVE2, this option can be omitted; in this case, only the Binary Protocol optimization takes effect, and the Compact Protocol falls back to the scalar path.
-   > - You can set `DCMAKE_INSTALL_PREFIX` to a custom fbthrift installation destination.
-   > - Set each `Dxxx_DIR` parameter to the actual installation path.
+   > - You can set `-DCMAKE_INSTALL_PREFIX` to a custom fbthrift installation destination.
+   > - Set each `-Dxxx_DIR` parameter to the actual installation path.
 
 ## Performance Benchmarking
 
@@ -160,13 +160,13 @@ The optimization solution is tested on an AArch64 machine that supports SVE2 usi
 
 3. Perform compilation and running.
 
-   * Test the Compact Protocol (default).
+   - Test the Compact Protocol (default).
 
      ```bash
      bash compile-and-run.sh
      ```
 
-   * Test the Binary Protocol.
+   - Test the Binary Protocol.
 
      ```bash
      bash compile-and-run.sh binary

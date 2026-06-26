@@ -1,24 +1,24 @@
-# 快速入门
+# Quick Start
 
-## 环境要求
+## Environment Requirements
 
-- 已验证的OS：Debian 12等支持ARM SVE2指令集的Linux系统。
-- 已验证的编译器：clang-16或更高版本。
-- CPU要求：Compact Protocol SVE2优化需要支持SVE2指令集的CPU，Binary Protocol优化无特殊CPU要求。
-- 系统依赖：需要安装相关依赖包。
+- Verified OSs: Linux systems that support the Arm SVE2 instruction set, such as Debian 12
+- Verified compilers: Clang 16 or later
+- CPU requirements: Compact Protocol SVE2 optimization requires a CPU that supports the SVE2 instruction set; Binary Protocol optimization has no special CPU requirements.
+- System dependencies: Related dependency packages need to be installed.
 
-## 使能FbThrift序列化优化
+## Enabling fbthrift Serialization Optimization
 
-本优化方案针对FbThrift的Compact Protocol和Binary Protocol进行整型数组批量编码优化。Compact Protocol引入基于ARM SVE2的批量Varint编码，Binary Protocol引入基于`memcpy`和`bswap`的编译器自动向量化优化。两种优化均通过SFINAE机制在编译期自动选择最优路径，对下游业务代码零侵入。
+This solution optimizes batch integer array encoding for fbthrift's Compact Protocol and Binary Protocol. The Compact Protocol introduces batch Varint encoding based on Arm SVE2, and the Binary Protocol introduces automatic compiler vectorization based on `memcpy` and `bswap`. Both optimizations automatically select the optimal path at compile time via the SFINAE mechanism, ensuring zero intrusion into downstream application code.
 
-1. 获取优化后的FbThrift源码。
+1. Obtain the optimized fbthrift source code.
 
    ```bash
    git clone -b dev_20221114 https://gitcode.com/boostkit/fbthrift.git
    cd fbthrift
    ```
 
-2. 在Debian系系统上，需要安装以下依赖。
+2. On a Debian system, install the following dependencies.
 
    ```bash
    apt install libboost-all-dev libdouble-conversion-dev libgflags-dev \
@@ -27,14 +27,14 @@
    libunwind-dev libdwarf-dev binutils-dev libiberty-dev zlib1g-dev libbz2-dev
    ```
 
-3. 安装前置依赖。建议将前置依赖包安装在一个固定路径，使用统一编译器Clang 16。
+3. Install the prerequisite dependencies. You are advised to install the prerequisite dependency packages in a fixed path and use the unified compiler Clang 16.
 
    ```bash
    export CC=/usr/bin/clang-16
    export CXX=/usr/bin/clang++-16
    ```
 
-   1. 安装zstd。
+   1. Install zstd.
 
       ```bash
       wget https://github.com/facebook/zstd/releases/download/v1.4.5/zstd-1.4.5.tar.gz
@@ -43,7 +43,7 @@
       make PREFIX=/usr/local/ install
       ```
 
-   2. 安装fmt。
+   2. Install fmt.
 
       ```bash
       wget https://github.com/fmtlib/fmt/archive/refs/tags/8.0.1.tar.gz
@@ -53,7 +53,7 @@
       make -j && make install
       ```
 
-   3. 安装zlib。
+   3. Install zlib.
 
       ```bash
       wget https://www.zlib.net/fossils/zlib-1.2.13.tar.gz
@@ -62,7 +62,7 @@
       make -j && make install
       ```
 
-   4. 安装boost。
+   4. Install boost.
 
       ```bash
       wget https://archives.boost.io/release/1.78.0/source/boost_1_78_0.tar.gz
@@ -71,7 +71,7 @@
       ./b2 install
       ```
 
-4. 编译folly。
+4. Compile folly.
 
    ```bash
    git clone -b v2022.11.14.00 https://github.com/facebook/folly.git
@@ -88,11 +88,11 @@
    make -j && make install
    ```
 
-   > **说明：**
-   > - `-DCMAKE_INSTALL_PREFIX`可替换为自定义的folly安装目的地址。
-   > - `-DCMAKE_PREFIX_PATH`可替换为依赖包安装的位置，如fmt安装的cmake路径。
+   > **NOTE**
+   > - You can set `-DCMAKE_INSTALL_PREFIX` to a custom folly installation destination.
+   > - You can set `-CMAKE_PREFIX_PATH` to the location where a dependency package is installed, for example, the CMake path for installing fmt.
 
-5. 编译fizz。
+5. Compile fizz.
 
    ```bash
    git clone -b v2022.11.14.00 https://github.com/facebookincubator/fizz.git
@@ -105,7 +105,7 @@
    make -j && make install
    ```
 
-6. 编译wangle。
+6. Compile wangle.
 
    ```bash
    git clone -b v2022.11.14.00 https://github.com/facebook/wangle.git
@@ -120,7 +120,7 @@
    make -j && make install
    ```
 
-7. 编译FbThrift。
+7. Compile fbthrift.
 
    ```bash
    cd fbthrift
@@ -136,37 +136,37 @@
    make -j && make install
    ```
 
-   > **说明：**
-   > - `-DTHRIFT_ENABLE_ARM_SVE2=ON`：启用Compact Protocol的SVE2优化。若目标CPU不支持SVE2，可省略此选项，此时仅Binary Protocol优化生效，Compact Protocol回退到scalar路径。
-   > - `-DCMAKE_INSTALL_PREFIX`可替换为自定义的FbThrift安装目的地址。
-   > - 各`-Dxxx_DIR`参数需替换为实际安装路径。
+   > **NOTE**
+   > - `-DTHRIFT_ENABLE_ARM_SVE2=ON`: Enables the SVE2 optimization for the Compact Protocol. If the target CPU does not support SVE2, this option can be omitted; in this case, only the Binary Protocol optimization takes effect, and the Compact Protocol falls back to the scalar path.
+   > - You can set `-DCMAKE_INSTALL_PREFIX` to a custom fbthrift installation destination.
+   > - Set each `-Dxxx_DIR` parameter to the actual installation path.
 
-## 性能基准测试（Benchmark）
+## Performance Benchmarking
 
-优化方案在支持SVE2的AArch64机器上，使用Google Benchmark框架进行测试。
+The optimization solution is tested on an AArch64 machine that supports SVE2 using the Google Benchmark framework.
 
-1. 获取测试框架代码。
+1. Obtain the test framework code.
 
    ```bash
    git clone https://gitcode.com/boostkit/AccLibBenchmark.git
    cd AccLibBenchmark/fbthrift-opt-benchmarks
    ```
 
-2. 修改`config.sh`中的`FBTHRIFT_HOME`为实际FbThrift安装目录。
+2. Change the value of `FBTHRIFT_HOME` in `config.sh` to the actual fbthrift installation directory.
 
    ```bash
    export FBTHRIFT_HOME=/usr/local/fbthrift
    ```
 
-3. 编译与运行。
+3. Perform compilation and running.
 
-   - 测试Compact Protocol（默认）
+   - Test the Compact Protocol (default).
 
      ```bash
      bash compile-and-run.sh
      ```
 
-   - 测试Binary Protocol
+   - Test the Binary Protocol.
 
      ```bash
      bash compile-and-run.sh binary

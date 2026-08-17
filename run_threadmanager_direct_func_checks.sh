@@ -211,10 +211,30 @@ calculate_incremental_coverage() {
   "${llvm_cov}" show "${binary}" \
     -instr-profile="${profile}" \
     -format=html \
-    -output-dir="${artifacts}/html" \
+    -output-dir="${artifacts}/html/full" \
     "${source_file}" "${test_source}" >/dev/null
 
+  local changed_lines
+  local executable_changed_lines
+  local covered_changed_lines
+  local missed_changed_lines
   local actual_coverage
+  changed_lines="$(
+    awk -F= '$1 == "CHANGED_LINES" { print $2 }' \
+      "${artifacts}/incremental-coverage.txt"
+  )"
+  executable_changed_lines="$(
+    awk -F= '$1 == "EXECUTABLE_CHANGED_LINES" { print $2 }' \
+      "${artifacts}/incremental-coverage.txt"
+  )"
+  covered_changed_lines="$(
+    awk -F= '$1 == "COVERED_CHANGED_LINES" { print $2 }' \
+      "${artifacts}/incremental-coverage.txt"
+  )"
+  missed_changed_lines="$(
+    awk -F= '$1 == "MISSED_CHANGED_LINES" { print $2 }' \
+      "${artifacts}/incremental-coverage.txt"
+  )"
   actual_coverage="$(
     awk -F= '
       $1 == "INCREMENTAL_LINE_COVERAGE" {
@@ -223,6 +243,79 @@ calculate_incremental_coverage() {
       }
     ' "${artifacts}/incremental-coverage.txt"
   )"
+
+  mkdir -p "${artifacts}/html"
+  awk \
+    -v commit="${direct_func_commit}" \
+    -v actual="${actual_coverage}" \
+    -v required="${minimum_coverage}" \
+    -v changed="${changed_lines}" \
+    -v executable="${executable_changed_lines}" \
+    -v covered="${covered_changed_lines}" \
+    -v missed="${missed_changed_lines}" '
+    function escape_html(text, output, position, character) {
+      output = ""
+      for (position = 1; position <= length(text); ++position) {
+        character = substr(text, position, 1)
+        if (character == "&") {
+          output = output "&amp;"
+        } else if (character == "<") {
+          output = output "&lt;"
+        } else if (character == ">") {
+          output = output "&gt;"
+        } else {
+          output = output character
+        }
+      }
+      return output
+    }
+    BEGIN {
+      passed = actual + 0 >= required + 0
+      result = passed ? "PASS" : "FAIL"
+      result_class = passed ? "pass" : "fail"
+      print "<!doctype html>"
+      print "<html><head><meta charset=\"utf-8\">"
+      print "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+      print "<title>ThreadManager Incremental Coverage</title>"
+      print "<style>"
+      print "body{font-family:Arial,sans-serif;margin:32px;color:#172033;background:#f5f7fb}"
+      print "h1{margin-bottom:6px}.subtitle{color:#65718a;margin-top:0}"
+      print ".cards{display:flex;gap:16px;flex-wrap:wrap;margin:24px 0}"
+      print ".card{background:white;border-radius:10px;padding:18px 22px;min-width:170px;box-shadow:0 2px 10px #dfe5ef}"
+      print ".value{font-size:28px;font-weight:700}.label{color:#65718a;margin-top:4px}"
+      print ".pass,.covered{color:#16833b}.fail,.missed{color:#c23131}"
+      print "table{width:100%;border-collapse:collapse;background:white;box-shadow:0 2px 10px #dfe5ef}"
+      print "th,td{text-align:left;padding:9px 12px;border-bottom:1px solid #e7ebf2}"
+      print "th{background:#edf1f7}code{white-space:pre-wrap}"
+      print ".note{background:#fff8df;border-left:4px solid #d7a500;padding:12px 16px;margin:20px 0}"
+      print "</style></head><body>"
+      print "<h1>ThreadManager Incremental Coverage</h1>"
+      printf "<p class=\"subtitle\">Executable lines added by optimization commit %s only</p>\n", commit
+      print "<div class=\"cards\">"
+      printf "<div class=\"card\"><div class=\"value\">%.2f%%</div><div class=\"label\">Incremental line coverage</div></div>\n", actual
+      printf "<div class=\"card\"><div class=\"value\">%s/%s</div><div class=\"label\">Covered executable lines</div></div>\n", covered, executable
+      printf "<div class=\"card\"><div class=\"value %s\">%s</div><div class=\"label\">Gate &gt;= %.2f%%</div></div>\n", result_class, result, required
+      print "</div>"
+      printf "<div class=\"note\">This is a diff coverage report: %s changed lines, %s executable, %s covered and %s missed. The <a href=\"full/index.html\">full-file LLVM report</a> includes unrelated legacy ThreadManager code and is not the 80%% gate.</div>\n", changed, executable, covered, missed
+      print "<table><thead><tr><th>Status</th><th>Line</th><th>Count</th><th>Source</th></tr></thead><tbody>"
+    }
+    {
+      status = $1
+      line = $2
+      count = $3
+      sub(/^line=/, "", line)
+      sub(/^count=/, "", count)
+      source = $0
+      sub(/^[^[:space:]]+[[:space:]]+line=[^[:space:]]+[[:space:]]+count=[^[:space:]]+[[:space:]]*/, "", source)
+      css_class = status == "COVERED" ? "covered" : "missed"
+      printf "<tr><td class=\"%s\">%s</td><td>%s</td><td>%s</td><td><code>%s</code></td></tr>\n", \
+        css_class, status, line, count, escape_html(source)
+    }
+    END {
+      print "</tbody></table></body></html>"
+    }
+  ' "${artifacts}/incremental-lines.txt" \
+    > "${artifacts}/html/index.html"
 
   if ! awk -v actual="${actual_coverage}" -v required="${minimum_coverage}" \
     'BEGIN { exit !(actual + 0 >= required + 0) }'; then
@@ -267,7 +360,8 @@ run_coverage() {
   echo "Summary:            ${artifacts}/incremental-coverage.txt"
   echo "Changed-line detail: ${artifacts}/incremental-lines.txt"
   echo "Full report:         ${artifacts}/full-report.txt"
-  echo "HTML report:         ${artifacts}/html/index.html"
+  echo "Incremental HTML:     ${artifacts}/html/index.html"
+  echo "Full-file LLVM HTML:  ${artifacts}/html/full/index.html"
 }
 
 case "${mode}" in

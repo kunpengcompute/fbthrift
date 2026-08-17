@@ -48,6 +48,14 @@ target_link_libraries(
     ${GLOG_LIBRARIES}
 )
 
+if(enable_tests)
+  thrift_gtest(
+    thread_manager_direct_func
+    concurrency/test/ThreadManagerDirectFuncTest.cpp
+    concurrency
+  )
+endif()
+
 add_library(
   transport
 

@@ -1224,3 +1224,1547 @@ index 75e2f77f7b..7601fb81da 100644
    }
  
    template <bool ZeroCopy, typename Protocol>
+diff --git a/thrift/lib/cpp/concurrency/ThreadManager.cpp b/thrift/lib/cpp/concurrency/ThreadManager.cpp
+index ac0e95e91f..2d30ce0af0 100644
+--- a/thrift/lib/cpp/concurrency/ThreadManager.cpp
++++ b/thrift/lib/cpp/concurrency/ThreadManager.cpp
+@@ -24,6 +24,7 @@
+ #include <queue>
+ #include <set>
+ #include <string>
++#include <variant>
+ 
+ #include <glog/logging.h>
+ 
+@@ -50,6 +51,11 @@
+ FOLLY_GFLAGS_DEFINE_bool(
+     codel_enabled, false, "Enable codel queue timeout algorithm");
+ 
++FOLLY_GFLAGS_DEFINE_bool(
++    thrift_thread_manager_direct_func_enabled,
++    true,
++    "Store folly::Func directly in ThreadManager tasks");
++
+ namespace apache {
+ namespace thrift {
+ namespace concurrency {
+@@ -172,20 +178,56 @@ class ThreadManager::Task {
+         context_(folly::RequestContext::saveContext()),
+         qpriority_(qpriority) {}
+ 
++  Task(
++      folly::Func func,
++      const std::chrono::milliseconds& expiration,
++      size_t qpriority)
++      : runnable_(std::move(func)),
++        queueBeginTime_(std::chrono::steady_clock::now()),
++        expireTime_(
++            expiration > std::chrono::milliseconds::zero()
++                ? queueBeginTime_ + expiration
++                : std::chrono::steady_clock::time_point()),
++        context_(folly::RequestContext::saveContext()),
++        qpriority_(qpriority) {}
++
+   ~Task() {}
+ 
+   void run() {
+     folly::RequestContextScopeGuard rctx(context_);
+-    invokeCatchingExns(
+-        "ThreadManager: func", [&] { std::exchange(runnable_, {})->run(); });
++    invokeCatchingExns("ThreadManager: func", [&] {
++      if (auto* func = std::get_if<folly::Func>(&runnable_)) {
++        std::exchange(*func, folly::Func{})();
++      } else {
++        std::exchange(
++            std::get<std::shared_ptr<Runnable>>(runnable_),
++            std::shared_ptr<Runnable>{})
++            ->run();
++      }
++    });
+   }
+ 
+   void skip() {
+     folly::RequestContextScopeGuard rctx(context_);
+-    std::exchange(runnable_, {});
++    if (auto* func = std::get_if<folly::Func>(&runnable_)) {
++      std::exchange(*func, folly::Func{});
++    } else {
++      std::exchange(
++          std::get<std::shared_ptr<Runnable>>(runnable_),
++          std::shared_ptr<Runnable>{});
++    }
+   }
+ 
+-  const std::shared_ptr<Runnable>& getRunnable() const { return runnable_; }
++  const std::shared_ptr<Runnable>& getRunnable() const {
++    // Preserve the legacy callback/removal API without paying for a
++    // FunctionRunner allocation on the normal execution path.
++    if (auto* func = std::get_if<folly::Func>(&runnable_)) {
++      auto runnable = FunctionRunner::create(std::move(*func));
++      runnable_.template emplace<std::shared_ptr<Runnable>>(
++          std::move(runnable));
++    }
++    return std::get<std::shared_ptr<Runnable>>(runnable_);
++  }
+ 
+   std::chrono::steady_clock::time_point getExpireTime() const {
+     return expireTime_;
+@@ -208,7 +250,7 @@ class ThreadManager::Task {
+   size_t queuePriority() const { return qpriority_; }
+ 
+  private:
+-  std::shared_ptr<Runnable> runnable_;
++  mutable std::variant<std::shared_ptr<Runnable>, folly::Func> runnable_;
+   std::chrono::steady_clock::time_point queueBeginTime_;
+   std::chrono::steady_clock::time_point expireTime_;
+   std::shared_ptr<folly::RequestContext> context_;
+@@ -310,7 +352,11 @@ class ThreadManager::Impl : public ThreadManager,
+    * Implements folly::Executor::add()
+    */
+   void add(folly::Func f) override {
+-    add(FunctionRunner::create(std::move(f)));
++    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
++      addFunc(0, std::move(f), 0, Source::INTERNAL);
++    } else {
++      add(FunctionRunner::create(std::move(f)));
++    }
+   }
+ 
+   void remove(std::shared_ptr<Runnable> task) override;
+@@ -350,6 +396,12 @@ class ThreadManager::Impl : public ThreadManager,
+ 
+   std::chrono::nanoseconds getUsedCpuTime() const override;
+ 
++  void addFunc(
++      size_t priority,
++      folly::Func func,
++      int64_t expiration,
++      Source source) noexcept;
++
+  protected:
+   void add(
+       size_t priority,
+@@ -455,7 +507,11 @@ class SimpleThreadManagerImpl : public ThreadManager::Impl {
+ 
+   void addWithPriorityAndSource(folly::Func f, PRIORITY pri, Source source) {
+     DCHECK(pri == PRIORITY::NORMAL);
+-    add(FunctionRunner::create(std::move(f)), 0, 0, source);
++    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
++      addFunc(0, std::move(f), 0, source);
++    } else {
++      add(FunctionRunner::create(std::move(f)), 0, 0, source);
++    }
+   }
+ 
+  private:
+@@ -884,6 +940,38 @@ void ThreadManager::Impl::add(
+   }
+ }
+ 
++void ThreadManager::Impl::addFunc(
++    size_t priority,
++    folly::Func func,
++    int64_t expiration,
++    ThreadManager::Source source) noexcept {
++  CHECK(
++      state_ != ThreadManager::UNINITIALIZED &&
++      state_ != ThreadManager::STARTING)
++      << "ThreadManager::Impl::addFunc ThreadManager not started";
++
++  if (state_ != ThreadManager::STARTED) {
++    LOG(WARNING) << "abort addFunc() that got called after join() or stop()";
++    return;
++  }
++
++  priority = N_SOURCES * priority + static_cast<int>(source);
++  const auto qpriority = std::min(tasks_.priorities() - 1, priority);
++  auto task = std::make_unique<Task>(
++      std::move(func), std::chrono::milliseconds{expiration}, qpriority);
++  if (queueObservers_) {
++    task->queueObserverPayload() =
++        queueObservers_->at(qpriority)->onEnqueued(task->getContext().get());
++  }
++  tasks_.at_priority(qpriority).enqueue(std::move(task));
++
++  ++totalTaskCount_;
++
++  if (idleCount_ > 0) {
++    waitSem_.post();
++  }
++}
++
+ void ThreadManager::Impl::remove(std::shared_ptr<Runnable> /*task*/) {
+   std::unique_lock<std::mutex> l(mutex_);
+   if (state_ != ThreadManager::STARTED) {
+@@ -1191,7 +1279,11 @@ class PriorityThreadManager::PriorityImpl
+   }
+ 
+   void addWithPriorityAndSource(folly::Func f, PRIORITY pri, Source source) {
+-    managers_[pri]->add(FunctionRunner::create(std::move(f)), 0, 0, source);
++    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
++      managers_[pri]->addFunc(0, std::move(f), 0, source);
++    } else {
++      managers_[pri]->add(FunctionRunner::create(std::move(f)), 0, 0, source);
++    }
+   }
+ 
+   KeepAlive<> getKeepAlive(ExecutionScope es, Source source) const override {
+@@ -1204,7 +1296,12 @@ class PriorityThreadManager::PriorityImpl
+    * Implements folly::Executor::add()
+    */
+   void add(folly::Func f) override {
+-    add(FunctionRunner::create(std::move(f)));
++    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
++      managers_[PRIORITY::NORMAL]->addFunc(
++          0, std::move(f), 0, Source::INTERNAL);
++    } else {
++      add(FunctionRunner::create(std::move(f)));
++    }
+   }
+ 
+   /**
+@@ -1218,7 +1315,11 @@ class PriorityThreadManager::PriorityImpl
+    */
+   void addWithPriority(folly::Func f, int8_t priority) override {
+     auto prio = translatePriority(priority);
+-    add(prio, FunctionRunner::create(std::move(f)));
++    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
++      managers_[prio]->addFunc(0, std::move(f), 0, Source::INTERNAL);
++    } else {
++      add(prio, FunctionRunner::create(std::move(f)));
++    }
+   }
+ 
+   template <typename T>
+@@ -1334,7 +1435,7 @@ class PriorityThreadManager::PriorityImpl
+         pri, source, this);
+   }
+ 
+-  std::unique_ptr<ThreadManager> managers_[N_PRIORITIES];
++  std::unique_ptr<ThreadManager::Impl> managers_[N_PRIORITIES];
+   size_t counts_[N_PRIORITIES];
+   mutable std::mutex mutex_;
+   std::vector<std::unique_ptr<Executor, Deleter>> executors_;
+@@ -1380,12 +1481,20 @@ class PriorityQueueThreadManager : public ThreadManager::Impl {
+     // and we want to prioritize inflight requests over admitting new request.
+     // arguably, we may even want a priority above the max we ever allow for
+     // initial queueing
+-    ThreadManager::Impl::add(
+-        PRIORITY::HIGH_IMPORTANT,
+-        std::make_shared<FunctionRunner>(std::move(f)),
+-        0,
+-        0,
+-        apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
++    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
++      ThreadManager::Impl::addFunc(
++          PRIORITY::HIGH_IMPORTANT,
++          std::move(f),
++          0,
++          apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
++    } else {
++      ThreadManager::Impl::add(
++          PRIORITY::HIGH_IMPORTANT,
++          std::make_shared<FunctionRunner>(std::move(f)),
++          0,
++          0,
++          apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
++    }
+   }
+ 
+   /**
+@@ -1393,12 +1502,20 @@ class PriorityQueueThreadManager : public ThreadManager::Impl {
+    */
+   void addWithPriority(folly::Func f, int8_t priority) override {
+     auto prio = translatePriority(priority);
+-    ThreadManager::Impl::add(
+-        prio,
+-        std::make_shared<FunctionRunner>(std::move(f)),
+-        0,
+-        0,
+-        apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
++    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
++      ThreadManager::Impl::addFunc(
++          prio,
++          std::move(f),
++          0,
++          apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
++    } else {
++      ThreadManager::Impl::add(
++          prio,
++          std::make_shared<FunctionRunner>(std::move(f)),
++          0,
++          0,
++          apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
++    }
+   }
+ 
+   uint8_t getNumPriorities() const override { return N_PRIORITIES; }
+@@ -1409,7 +1526,11 @@ class PriorityQueueThreadManager : public ThreadManager::Impl {
+   }
+ 
+   void addWithPriorityAndSource(folly::Func f, PRIORITY pri, Source source) {
+-    add(pri, std::make_shared<FunctionRunner>(std::move(f)), 0, 0, source);
++    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
++      addFunc(pri, std::move(f), 0, source);
++    } else {
++      add(pri, std::make_shared<FunctionRunner>(std::move(f)), 0, 0, source);
++    }
+   }
+ 
+   KeepAlive<> getKeepAlive(ExecutionScope es, Source source) const override {
+diff --git a/run_threadmanager_direct_func_checks.sh b/run_threadmanager_direct_func_checks.sh
+new file mode 100755
+index 0000000000..51913047be
+--- /dev/null
++++ b/run_threadmanager_direct_func_checks.sh
+@@ -0,0 +1,284 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++usage() {
++  cat <<'EOF'
++Usage:
++  run_threadmanager_direct_func_checks.sh [ut|coverage|all]
++
++Modes:
++  ut        Build with Clang 16 and run the ThreadManager direct-func UTs.
++  coverage  Build with coverage instrumentation, run the UTs, and calculate
++            incremental line coverage for the optimization commit.
++  all       Run both steps. This is the default.
++
++Optional environment variables:
++  DIRECT_FUNC_COMMIT             Optimization commit, default: 0c5106f
++  MIN_INCREMENTAL_COVERAGE       Required percentage, default: 80
++  FBTHRIFT_UT_BUILD_DIR          Normal UT build directory
++  FBTHRIFT_COVERAGE_BUILD_DIR    Coverage build directory
++  FBTHRIFT_CLANG16_CXX           Normal compiler
++  FBTHRIFT_COVERAGE_CXX          Coverage compiler; must include profile runtime
++  FBTHRIFT_FOLLY_PREFIX          Installed Folly prefix
++  FBTHRIFT_FIZZ_PREFIX           Installed Fizz prefix
++  FBTHRIFT_WANGLE_PREFIX         Installed Wangle prefix
++  FBTHRIFT_INSTALL_PREFIX        Installed fbthrift prefix
++
++Examples:
++  ./run_threadmanager_direct_func_checks.sh ut
++  ./run_threadmanager_direct_func_checks.sh coverage
++  MIN_INCREMENTAL_COVERAGE=85 ./run_threadmanager_direct_func_checks.sh all
++EOF
++}
++
++mode="${1:-all}"
++case "${mode}" in
++  ut|coverage|all) ;;
++  -h|--help)
++    usage
++    exit 0
++    ;;
++  *)
++    usage >&2
++    exit 2
++    ;;
++esac
++
++script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++repo="$(git -C "${script_dir}" rev-parse --show-toplevel)"
++
++direct_func_commit="${DIRECT_FUNC_COMMIT:-0c5106f}"
++minimum_coverage="${MIN_INCREMENTAL_COVERAGE:-80}"
++relative_source=thrift/lib/cpp/concurrency/ThreadManager.cpp
++source_file="${repo}/${relative_source}"
++test_source="${repo}/thrift/lib/cpp/concurrency/test/ThreadManagerDirectFuncTest.cpp"
++test_target=thread_manager_direct_func-t
++test_filter='ThreadManagerDirectFuncTest'
++
++ut_build="${FBTHRIFT_UT_BUILD_DIR:-/tmp/fbthrift-threadmanager-direct-func-ut}"
++coverage_build="${FBTHRIFT_COVERAGE_BUILD_DIR:-/tmp/fbthrift-threadmanager-direct-func-coverage}"
++
++clang16_cxx="${FBTHRIFT_CLANG16_CXX:-/home/donghuan/clang-16/bin/clang++}"
++coverage_cxx="${FBTHRIFT_COVERAGE_CXX:-/usr/bin/clang++}"
++llvm_profdata="${LLVM_PROFDATA:-/usr/bin/llvm-profdata}"
++llvm_cov="${LLVM_COV:-/usr/bin/llvm-cov}"
++
++folly_prefix="${FBTHRIFT_FOLLY_PREFIX:-/home/donghuan/ins/folly}"
++fizz_prefix="${FBTHRIFT_FIZZ_PREFIX:-/home/donghuan/ins/fizz}"
++wangle_prefix="${FBTHRIFT_WANGLE_PREFIX:-/home/donghuan/ins/wangle}"
++fbthrift_prefix="${FBTHRIFT_INSTALL_PREFIX:-/home/donghuan/ins/fbthrift}"
++
++runtime_library_path="${folly_prefix}/lib:${fizz_prefix}/lib:${wangle_prefix}/lib:${fbthrift_prefix}/lib"
++if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
++  runtime_library_path="${runtime_library_path}:${LD_LIBRARY_PATH}"
++fi
++
++require_executable() {
++  if [[ ! -x "$1" ]]; then
++    echo "Required executable not found: $1" >&2
++    exit 1
++  fi
++}
++
++require_executable "${clang16_cxx}"
++require_executable "${coverage_cxx}"
++require_executable "${llvm_profdata}"
++require_executable "${llvm_cov}"
++
++git -C "${repo}" rev-parse --verify "${direct_func_commit}^{commit}" >/dev/null
++
++common_cmake_args=(
++  -DCMAKE_BUILD_TYPE=Debug
++  "-DCMAKE_PREFIX_PATH=${folly_prefix};${fizz_prefix};${wangle_prefix}"
++  "-Dfizz_DIR=${fizz_prefix}/lib/cmake/fizz"
++  "-Dwangle_DIR=${wangle_prefix}/lib/cmake/wangle"
++  -Denable_tests=ON
++  -Dlib_only=ON
++  -Dthriftpy=OFF
++  -Dthriftpy3=OFF
++  "-DTHRIFT_COMPILER_INCLUDE=${fbthrift_prefix}/include"
++)
++
++run_ut() {
++  echo "== Configure normal UT build =="
++  cmake -S "${repo}" -B "${ut_build}" \
++    "${common_cmake_args[@]}" \
++    "-DCMAKE_CXX_COMPILER=${clang16_cxx}"
++
++  echo "== Build ${test_target} =="
++  cmake --build "${ut_build}" --target "${test_target}" -j"$(nproc)"
++
++  echo "== Run ThreadManager direct-func UTs =="
++  LD_LIBRARY_PATH="${runtime_library_path}" \
++    ctest --test-dir "${ut_build}" \
++      --output-on-failure \
++      -R "${test_filter}"
++}
++
++calculate_incremental_coverage() {
++  local binary="$1"
++  local profile="$2"
++  local artifacts="$3"
++
++  git -C "${repo}" diff --unified=0 \
++    "${direct_func_commit}^" "${direct_func_commit}" -- \
++    "${relative_source}" |
++    awk '
++      /^@@/ {
++        if (match($0, /\+([0-9]+)(,([0-9]+))?/, range)) {
++          start = range[1]
++          count = range[3] == "" ? 1 : range[3]
++          for (offset = 0; offset < count; ++offset) {
++            print start + offset
++          }
++        }
++      }
++    ' > "${artifacts}/added-lines.txt"
++
++  "${llvm_cov}" show "${binary}" \
++    -instr-profile="${profile}" \
++    -show-line-counts-or-regions \
++    -show-expansions=false \
++    -show-instantiations=false \
++    "${source_file}" |
++    awk -F '|' '
++      NF >= 3 {
++        line = $1
++        count = $2
++        gsub(/[[:space:]]/, "", line)
++        gsub(/[[:space:],]/, "", count)
++        if (line ~ /^[0-9]+$/ && count ~ /^[0-9]+$/) {
++          print line, count
++        }
++      }
++    ' > "${artifacts}/line-counts.txt"
++
++  awk '
++    FNR == NR {
++      added[$1] = 1
++      changed++
++      next
++    }
++    $1 in added {
++      executable++
++      if ($2 > 0) {
++        covered++
++      } else {
++        missed++
++        missed_lines = missed_lines (missed_lines == "" ? "" : ",") $1
++      }
++    }
++    END {
++      printf "DIRECT_FUNC_COMMIT=%s\n", commit
++      printf "CHANGED_LINES=%d\n", changed
++      printf "EXECUTABLE_CHANGED_LINES=%d\n", executable
++      printf "COVERED_CHANGED_LINES=%d\n", covered
++      printf "MISSED_CHANGED_LINES=%d\n", missed
++      printf "INCREMENTAL_LINE_COVERAGE=%.2f%%\n", \
++        executable == 0 ? 100 : covered * 100 / executable
++      printf "MISSED_EXECUTABLE_LINES=%s\n", missed_lines
++    }
++  ' commit="${direct_func_commit}" \
++    "${artifacts}/added-lines.txt" \
++    "${artifacts}/line-counts.txt" |
++    tee "${artifacts}/incremental-coverage.txt"
++
++  awk '
++    FILENAME == ARGV[1] {
++      added[$1] = 1
++      next
++    }
++    FILENAME == ARGV[2] {
++      if ($1 in added) {
++        status[$1] = $2 > 0 ? "COVERED" : "MISSED"
++        count[$1] = $2
++      }
++      next
++    }
++    FILENAME == ARGV[3] && FNR in status {
++      printf "%-7s line=%-5d count=%-5d %s\n", \
++        status[FNR], FNR, count[FNR], $0
++    }
++  ' "${artifacts}/added-lines.txt" \
++    "${artifacts}/line-counts.txt" \
++    "${source_file}" > "${artifacts}/incremental-lines.txt"
++
++  "${llvm_cov}" report "${binary}" \
++    -instr-profile="${profile}" \
++    "${source_file}" "${test_source}" \
++    > "${artifacts}/full-report.txt"
++
++  "${llvm_cov}" show "${binary}" \
++    -instr-profile="${profile}" \
++    -format=html \
++    -output-dir="${artifacts}/html" \
++    "${source_file}" "${test_source}" >/dev/null
++
++  local actual_coverage
++  actual_coverage="$(
++    awk -F= '
++      $1 == "INCREMENTAL_LINE_COVERAGE" {
++        gsub(/%/, "", $2)
++        print $2
++      }
++    ' "${artifacts}/incremental-coverage.txt"
++  )"
++
++  if ! awk -v actual="${actual_coverage}" -v required="${minimum_coverage}" \
++    'BEGIN { exit !(actual + 0 >= required + 0) }'; then
++    echo "Incremental coverage ${actual_coverage}% is below ${minimum_coverage}%" >&2
++    return 1
++  fi
++
++  echo "Incremental coverage gate passed: ${actual_coverage}% >= ${minimum_coverage}%"
++}
++
++run_coverage() {
++  echo "== Configure coverage build =="
++  cmake -S "${repo}" -B "${coverage_build}" \
++    "${common_cmake_args[@]}" \
++    "-DCMAKE_CXX_COMPILER=${coverage_cxx}" \
++    '-DCMAKE_CXX_FLAGS=-fprofile-instr-generate -fcoverage-mapping' \
++    '-DCMAKE_EXE_LINKER_FLAGS=-fprofile-instr-generate'
++
++  echo "== Build instrumented ${test_target} =="
++  cmake --build "${coverage_build}" --target "${test_target}" -j"$(nproc)"
++
++  local binary="${coverage_build}/bin/${test_target}"
++  local artifacts
++  artifacts="$(mktemp -d "${coverage_build}/coverage-artifacts.XXXXXX")"
++
++  echo "== Run instrumented UTs =="
++  LLVM_PROFILE_FILE="${artifacts}/direct-func-%p.profraw" \
++    LD_LIBRARY_PATH="${runtime_library_path}" \
++    "${binary}" --gtest_color=no
++
++  "${llvm_profdata}" merge -sparse \
++    "${artifacts}"/direct-func-*.profraw \
++    -o "${artifacts}/direct-func.profdata"
++
++  echo "== Calculate incremental line coverage =="
++  calculate_incremental_coverage \
++    "${binary}" \
++    "${artifacts}/direct-func.profdata" \
++    "${artifacts}"
++
++  echo "Coverage artifacts: ${artifacts}"
++  echo "Summary:            ${artifacts}/incremental-coverage.txt"
++  echo "Changed-line detail: ${artifacts}/incremental-lines.txt"
++  echo "Full report:         ${artifacts}/full-report.txt"
++  echo "HTML report:         ${artifacts}/html/index.html"
++}
++
++case "${mode}" in
++  ut)
++    run_ut
++    ;;
++  coverage)
++    run_coverage
++    ;;
++  all)
++    run_ut
++    run_coverage
++    ;;
++esac
+diff --git a/thrift/lib/cpp/CMakeLists.txt b/thrift/lib/cpp/CMakeLists.txt
+index 678ce38b41..cf38acc44b 100644
+--- a/thrift/lib/cpp/CMakeLists.txt
++++ b/thrift/lib/cpp/CMakeLists.txt
+@@ -48,6 +48,14 @@ target_link_libraries(
+     ${GLOG_LIBRARIES}
+ )
+ 
++if(enable_tests)
++  thrift_gtest(
++    thread_manager_direct_func
++    concurrency/test/ThreadManagerDirectFuncTest.cpp
++    concurrency
++  )
++endif()
++
+ add_library(
+   transport
+ 
+diff --git a/thrift/lib/cpp/concurrency/test/ThreadManagerDirectFuncTest.cpp b/thrift/lib/cpp/concurrency/test/ThreadManagerDirectFuncTest.cpp
+new file mode 100644
+index 0000000000..b448b87710
+--- /dev/null
++++ b/thrift/lib/cpp/concurrency/test/ThreadManagerDirectFuncTest.cpp
+@@ -0,0 +1,210 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <array>
++#include <atomic>
++#include <chrono>
++#include <functional>
++#include <memory>
++
++#include <folly/portability/GFlags.h>
++#include <folly/portability/GTest.h>
++#include <folly/synchronization/Baton.h>
++#include <thrift/lib/cpp/concurrency/FunctionRunner.h>
++#include <thrift/lib/cpp/concurrency/ThreadManager.h>
++
++FOLLY_GFLAGS_DECLARE_bool(thrift_thread_manager_direct_func_enabled);
++
++using apache::thrift::concurrency::FunctionRunner;
++using apache::thrift::concurrency::PriorityThreadManager;
++using apache::thrift::concurrency::Runnable;
++using apache::thrift::concurrency::ThreadManager;
++using namespace std::chrono_literals;
++
++namespace {
++
++using ManagerFactory = std::function<std::shared_ptr<ThreadManager>()>;
++
++class ThreadManagerDirectFuncTest : public testing::Test {
++ private:
++  gflags::FlagSaver flagSaver_;
++};
++
++std::array<ManagerFactory, 3> managerFactories() {
++  return {
++      [] { return ThreadManager::newSimpleThreadManager(1); },
++      [] { return ThreadManager::newPriorityQueueThreadManager(1); },
++      [] {
++        return PriorityThreadManager::newPriorityThreadManager(
++            {{1, 1, 1, 1, 1}});
++      }};
++}
++
++TEST_F(
++    ThreadManagerDirectFuncTest,
++    DirectPathExecutesMoveOnlyFuncAcrossManagerImplementations) {
++  FLAGS_thrift_thread_manager_direct_func_enabled = true;
++
++  for (const auto& makeManager : managerFactories()) {
++    auto manager = makeManager();
++    manager->start();
++
++    std::atomic<int> observed{0};
++    folly::Baton<> done;
++    auto value = std::make_unique<int>(42);
++    manager->add([value = std::move(value), &observed, &done]() mutable {
++      observed.store(*value, std::memory_order_relaxed);
++      value.reset();
++      done.post();
++    });
++
++    const bool completed = done.try_wait_for(5s);
++    manager->join();
++
++    EXPECT_TRUE(completed);
++    EXPECT_EQ(observed.load(std::memory_order_relaxed), 42);
++  }
++}
++
++TEST_F(ThreadManagerDirectFuncTest, DisabledFlagUsesLegacyExecutionPath) {
++  FLAGS_thrift_thread_manager_direct_func_enabled = false;
++
++  auto manager = ThreadManager::newSimpleThreadManager(1);
++  manager->start();
++
++  std::atomic<int> calls{0};
++  folly::Baton<> done;
++  manager->add([&] {
++    calls.fetch_add(1, std::memory_order_relaxed);
++    done.post();
++  });
++
++  const bool completed = done.try_wait_for(5s);
++  manager->join();
++
++  EXPECT_TRUE(completed);
++  EXPECT_EQ(calls.load(std::memory_order_relaxed), 1);
++}
++
++TEST_F(
++    ThreadManagerDirectFuncTest,
++    RemoveNextPendingLazilyMaterializesFunctionRunner) {
++  FLAGS_thrift_thread_manager_direct_func_enabled = true;
++
++  auto manager = ThreadManager::newSimpleThreadManager(1);
++  manager->start();
++
++  folly::Baton<> blockerStarted;
++  folly::Baton<> unblockWorker;
++  manager->add([&] {
++    blockerStarted.post();
++    unblockWorker.wait();
++  });
++
++  if (!blockerStarted.try_wait_for(5s)) {
++    unblockWorker.post();
++    manager->join();
++    FAIL() << "worker did not start the blocking task";
++  }
++
++  std::atomic<int> calls{0};
++  manager->add([&] { calls.fetch_add(1, std::memory_order_relaxed); });
++
++  std::shared_ptr<Runnable> removed = manager->removeNextPending();
++  unblockWorker.post();
++  manager->join();
++
++  ASSERT_NE(removed, nullptr);
++  EXPECT_NE(dynamic_cast<FunctionRunner*>(removed.get()), nullptr);
++  EXPECT_EQ(calls.load(std::memory_order_relaxed), 0);
++
++  removed->run();
++  EXPECT_EQ(calls.load(std::memory_order_relaxed), 1);
++}
++
++TEST_F(ThreadManagerDirectFuncTest, PriorityApisCoverDirectAndFallbackRoutes) {
++  auto priorityManager =
++      PriorityThreadManager::newPriorityThreadManager({{1, 1, 1, 1, 1}});
++  priorityManager->start();
++
++  folly::Baton<> priorityLegacyAdd;
++  folly::Baton<> priorityDirectAddWithPriority;
++  folly::Baton<> priorityLegacyAddWithPriority;
++
++  FLAGS_thrift_thread_manager_direct_func_enabled = false;
++  priorityManager->add([&] { priorityLegacyAdd.post(); });
++  FLAGS_thrift_thread_manager_direct_func_enabled = true;
++  priorityManager->addWithPriority(
++      [&] { priorityDirectAddWithPriority.post(); }, 1);
++  FLAGS_thrift_thread_manager_direct_func_enabled = false;
++  priorityManager->addWithPriority(
++      [&] { priorityLegacyAddWithPriority.post(); }, -1);
++
++  EXPECT_TRUE(priorityLegacyAdd.try_wait_for(5s));
++  EXPECT_TRUE(priorityDirectAddWithPriority.try_wait_for(5s));
++  EXPECT_TRUE(priorityLegacyAddWithPriority.try_wait_for(5s));
++  priorityManager->join();
++
++  auto priorityQueueManager = ThreadManager::newPriorityQueueThreadManager(1);
++  priorityQueueManager->start();
++
++  folly::Baton<> priorityQueueLegacyAdd;
++  folly::Baton<> priorityQueueDirectAddWithPriority;
++  folly::Baton<> priorityQueueLegacyAddWithPriority;
++
++  FLAGS_thrift_thread_manager_direct_func_enabled = false;
++  priorityQueueManager->add([&] { priorityQueueLegacyAdd.post(); });
++  FLAGS_thrift_thread_manager_direct_func_enabled = true;
++  priorityQueueManager->addWithPriority(
++      [&] { priorityQueueDirectAddWithPriority.post(); }, 1);
++  FLAGS_thrift_thread_manager_direct_func_enabled = false;
++  priorityQueueManager->addWithPriority(
++      [&] { priorityQueueLegacyAddWithPriority.post(); }, -1);
++
++  EXPECT_TRUE(priorityQueueLegacyAdd.try_wait_for(5s));
++  EXPECT_TRUE(priorityQueueDirectAddWithPriority.try_wait_for(5s));
++  EXPECT_TRUE(priorityQueueLegacyAddWithPriority.try_wait_for(5s));
++  priorityQueueManager->join();
++}
++
++TEST_F(
++    ThreadManagerDirectFuncTest,
++    KeepAliveSourceRoutesCoverDirectAndFallbackPaths) {
++  for (const auto& makeManager : managerFactories()) {
++    auto manager = makeManager();
++    manager->start();
++
++    folly::Baton<> directDone;
++    folly::Baton<> fallbackDone;
++    {
++      auto executor = manager->getKeepAlive(
++          ThreadManager::ExecutionScope(
++              apache::thrift::concurrency::PRIORITY::NORMAL),
++          ThreadManager::Source::UPSTREAM);
++
++      FLAGS_thrift_thread_manager_direct_func_enabled = true;
++      executor->add([&] { directDone.post(); });
++      FLAGS_thrift_thread_manager_direct_func_enabled = false;
++      executor->add([&] { fallbackDone.post(); });
++    }
++
++    EXPECT_TRUE(directDone.try_wait_for(5s));
++    EXPECT_TRUE(fallbackDone.try_wait_for(5s));
++    manager->join();
++  }
++}
++
++} // namespace
+diff --git a/thrift/compiler/generate/json.cc b/thrift/compiler/generate/json.cc
+index c4d87a3332..182a27417f 100644
+--- a/thrift/compiler/generate/json.cc
++++ b/thrift/compiler/generate/json.cc
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include <thrift/compiler/generate/json.h>
++#include <cstdint>
+ 
+ #include <ostream>
+ #include <sstream>
+diff --git a/thrift/lib/cpp/transport/THeader.cpp b/thrift/lib/cpp/transport/THeader.cpp
+index 792e9f7c8c..2a22319af3 100644
+--- a/thrift/lib/cpp/transport/THeader.cpp
++++ b/thrift/lib/cpp/transport/THeader.cpp
+@@ -16,6 +16,11 @@
+ 
+ #include <thrift/lib/cpp/transport/THeader.h>
+ 
++#define GET_QUEUE_LENGTH(queue)                         \
++  ((queue)->options().cacheChainLength                  \
++       ? (queue)->chainLength()                         \
++       : (queue)->front()->computeChainDataLength())
++
+ #include <fmt/core.h>
+ #include <folly/Conv.h>
+ #include <folly/ExceptionString.h>
+@@ -278,18 +283,15 @@ unique_ptr<IOBuf> THeader::removeNonHeader(
+ unique_ptr<IOBuf> THeader::removeHeader(
+     IOBufQueue* queue,
+     size_t& needed,
+-    StringToStringMap& persistentReadHeaders) {
++    StringToStringMap& persistentReadHeaders,
++    size_t& frameLength) {
++  frameLength = 0;
+   if (!queue || queue->empty()) {
+     needed = 4;
+     return nullptr;
+   }
+   Cursor c(queue->front());
+-  size_t remaining;
+-  if (queue->options().cacheChainLength) {
+-    remaining = queue->chainLength();
+-  } else {
+-    remaining = queue->front()->computeChainDataLength();
+-  }
++  size_t remaining = GET_QUEUE_LENGTH(queue);
+   size_t frameSizeBytes = 4;
+   needed = 0;
+ 
+@@ -311,6 +313,7 @@ unique_ptr<IOBuf> THeader::removeHeader(
+     unique_ptr<IOBuf> buf =
+         THeader::removeNonHeader(queue, needed, clientType_, sz32);
+     if (buf) {
++      frameLength = remaining + frameSizeBytes - GET_QUEUE_LENGTH(queue);
+       return buf;
+     }
+   }
+@@ -318,7 +321,12 @@ unique_ptr<IOBuf> THeader::removeHeader(
+   auto clientT = THeader::analyzeFirst32bit(sz32);
+   if (clientT) {
+     clientType_ = *clientT;
+-    return THeader::removeNonHeader(queue, needed, *clientT, sz32);
++    unique_ptr<IOBuf> buf =
++        THeader::removeNonHeader(queue, needed, *clientT, sz32);
++    if (buf) {
++      frameLength = remaining + frameSizeBytes - GET_QUEUE_LENGTH(queue);
++    }
++    return buf;
+   }
+ 
+   size_t sz;
+@@ -380,6 +388,7 @@ unique_ptr<IOBuf> THeader::removeHeader(
+   unique_ptr<IOBuf> buf =
+       THeader::removeNonHeader(queue, needed, clientType_, sz);
+   if (buf) {
++    frameLength = remaining + frameSizeBytes - GET_QUEUE_LENGTH(queue);
+     return buf;
+   }
+ 
+@@ -401,6 +410,7 @@ unique_ptr<IOBuf> THeader::removeHeader(
+   // Trim off the frame size.
+   queue->trimStart(frameSizeBytes);
+   buf = readHeaderFormat(queue->split(sz), persistentReadHeaders);
++  frameLength = frameSizeBytes + sz;
+ 
+   return buf;
+ }
+diff --git a/thrift/lib/cpp/transport/THeader.h b/thrift/lib/cpp/transport/THeader.h
+index ca4f761ed9..d111a603c8 100644
+--- a/thrift/lib/cpp/transport/THeader.h
++++ b/thrift/lib/cpp/transport/THeader.h
+@@ -299,7 +299,8 @@ class THeader final {
+   std::unique_ptr<folly::IOBuf> removeHeader(
+       folly::IOBufQueue*,
+       size_t& needed,
+-      StringToStringMap& persistentReadHeaders);
++      StringToStringMap& persistentReadHeaders,
++      size_t& frameLength);
+ 
+   void setDesiredCompressionConfig(CompressionConfig compressionConfig) {
+     compressionConfig_ = compressionConfig;
+diff --git a/thrift/lib/cpp/transport/test/THeaderFrameLengthTest.cpp b/thrift/lib/cpp/transport/test/THeaderFrameLengthTest.cpp
+new file mode 100644
+index 0000000000..7eb4215cff
+--- /dev/null
++++ b/thrift/lib/cpp/transport/test/THeaderFrameLengthTest.cpp
+@@ -0,0 +1,93 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <thrift/lib/cpp/transport/THeader.h>
++
++#include <folly/io/IOBuf.h>
++#include <folly/io/IOBufQueue.h>
++#include <folly/portability/GTest.h>
++
++#include <cstring>
++
++using namespace apache::thrift::transport;
++using namespace folly;
++
++static std::unique_ptr<IOBuf> makeHeaderMsg(size_t sz, THeader::StringToStringMap& h) {
++  THeader hdr;
++  auto buf = IOBuf::create(sz);
++  if (sz > 0) buf->writableData()[0] = 0x80;
++  std::memset(buf->writableData() + 1, 'X', sz > 1 ? sz - 1 : 0);
++  buf->append(sz);
++  return hdr.addHeader(std::move(buf), h);
++}
++
++TEST(THeaderFrameLengthTest, NullQueue) {
++  THeader h; size_t n=0, fl=999; THeader::StringToStringMap ph;
++  EXPECT_EQ(nullptr, h.removeHeader(nullptr, n, ph, fl));
++  EXPECT_EQ(0u, fl);
++}
++
++TEST(THeaderFrameLengthTest, EmptyQueue) {
++  THeader h; size_t n=0, fl=999; THeader::StringToStringMap ph; IOBufQueue q;
++  EXPECT_EQ(nullptr, h.removeHeader(&q, n, ph, fl));
++  EXPECT_EQ(0u, fl);
++}
++
++TEST(THeaderFrameLengthTest, NormalHeader) {
++  THeader::StringToStringMap ph; IOBufQueue q;
++  q.append(makeHeaderMsg(100, ph));
++  THeader h; size_t n=0, fl=0;
++  auto buf = h.removeHeader(&q, n, ph, fl);
++  ASSERT_NE(nullptr, buf); EXPECT_GT(fl, 0u);
++}
++
++TEST(THeaderFrameLengthTest, ForceClientType) {
++  size_t ps=12; uint32_t fs=ps; size_t extra=10;
++  auto f = IOBuf::create(4+ps+extra);
++  f->writableData()[0]=(fs>>24)&0xFF; f->writableData()[1]=(fs>>16)&0xFF;
++  f->writableData()[2]=(fs>>8)&0xFF; f->writableData()[3]=fs&0xFF;
++  f->writableData()[4]=0x80; f->writableData()[5]=0x01; f->writableData()[6]=0; f->writableData()[7]=0x01;
++  std::memset(f->writableData()+8, 0, ps-4);
++  std::memset(f->writableData()+4+ps, 'E', extra);
++  f->append(4+ps+extra); IOBufQueue q; q.append(std::move(f));
++  THeader h; h.setClientType(THRIFT_FRAMED_DEPRECATED); h.forceClientType(true);
++  THeader::StringToStringMap ph; size_t n=0, fl=0;
++  if (h.removeHeader(&q, n, ph, fl)) EXPECT_GT(fl, 0u);
++}
++
++TEST(THeaderFrameLengthTest, UnframedBinary) {
++  uint8_t data[] = {0x80,0x01,0,0x01, 0,0,0,0, 0x01, 0,0,0,0, 0x00};
++  size_t sz = sizeof(data);
++  auto full = IOBuf::create(sz + 10);
++  std::memcpy(full->writableData(), data, sz);
++  std::memset(full->writableData()+sz, 'E', 10);
++  full->append(sz+10); IOBufQueue q; q.append(std::move(full));
++  THeader h; THeader::StringToStringMap ph; size_t n=0, fl=0;
++  if (h.removeHeader(&q, n, ph, fl)) EXPECT_GT(fl, 0u);
++}
++
++TEST(THeaderFrameLengthTest, FramedBinary) {
++  uint8_t payload[] = {0x80,0x01,0,0x01, 0,0,0,0, 0x01, 0,0,0,0, 0x00};
++  uint32_t ps = sizeof(payload);
++  auto full = IOBuf::create(4 + ps + 10);
++  full->writableData()[0]=(ps>>24)&0xFF; full->writableData()[1]=(ps>>16)&0xFF;
++  full->writableData()[2]=(ps>>8)&0xFF; full->writableData()[3]=ps&0xFF;
++  std::memcpy(full->writableData()+4, payload, ps);
++  std::memset(full->writableData()+4+ps, 'E', 10);
++  full->append(4+ps+10); IOBufQueue q; q.append(std::move(full));
++  THeader h; THeader::StringToStringMap ph; size_t n=0, fl=0;
++  if (h.removeHeader(&q, n, ph, fl)) EXPECT_GT(fl, 0u);
++}
+diff --git a/thrift/lib/cpp/transport/test/THeaderTest.cpp b/thrift/lib/cpp/transport/test/THeaderTest.cpp
+index 4dbd593ac6..e667a74b7a 100644
+--- a/thrift/lib/cpp/transport/test/THeaderTest.cpp
++++ b/thrift/lib/cpp/transport/test/THeaderTest.cpp
+@@ -61,8 +61,9 @@ TEST(THeaderTest, largetransform) {
+   queue2->append(queue->move());
+ 
+   size_t needed;
++  size_t frameLength;
+ 
+-  buf = header.removeHeader(queue2.get(), needed, persistentHeaders);
++  buf = header.removeHeader(queue2.get(), needed, persistentHeaders, frameLength);
+   EXPECT_EQ(buf->computeChainDataLength(), 10000000);
+ }
+ 
+@@ -99,17 +100,19 @@ TEST(THeaderTest, eraseReadHeader) {
+ TEST(THeaderTest, removeHeaderNullptrQueue) {
+   THeader header;
+   size_t needed;
++  size_t frameLength;
+   THeader::StringToStringMap persistentHeaders;
+-  EXPECT_EQ(nullptr, header.removeHeader(nullptr, needed, persistentHeaders));
++  EXPECT_EQ(nullptr, header.removeHeader(nullptr, needed, persistentHeaders, frameLength));
+   EXPECT_EQ(4, needed);
+ }
+ 
+ TEST(THeaderTest, removeHeaderEmptyQueue) {
+   THeader header;
+   size_t needed;
++  size_t frameLength;
+   THeader::StringToStringMap persistentHeaders;
+   IOBufQueue queue(IOBufQueue::cacheChainLength());
+-  EXPECT_EQ(nullptr, header.removeHeader(&queue, needed, persistentHeaders));
++  EXPECT_EQ(nullptr, header.removeHeader(&queue, needed, persistentHeaders, frameLength));
+   EXPECT_EQ(4, needed);
+ }
+ 
+@@ -167,8 +170,9 @@ void testAsciiHeaderData(const std::string& data, const std::string& expected) {
+   queue->append(std::move(buf));
+ 
+   size_t needed;
++  size_t frameLength;
+   try {
+-    buf = header.removeHeader(queue.get(), needed, persistentHeaders);
++    buf = header.removeHeader(queue.get(), needed, persistentHeaders, frameLength);
+     ASSERT_TRUE(false);
+   } catch (TTransportException& e) {
+     ASSERT_EQ(e.what(), expected);
+diff --git a/thrift/lib/cpp2/async/DuplexChannel.cpp b/thrift/lib/cpp2/async/DuplexChannel.cpp
+index 84196f099e..39e7bfce21 100644
+--- a/thrift/lib/cpp2/async/DuplexChannel.cpp
++++ b/thrift/lib/cpp2/async/DuplexChannel.cpp
+@@ -61,17 +61,17 @@ FramingHandler& DuplexChannel::DuplexFramingHandler::getHandler(
+   }
+ }
+ 
+-std::tuple<std::unique_ptr<folly::IOBuf>, size_t, std::unique_ptr<THeader>>
++std::tuple<std::unique_ptr<folly::IOBuf>, size_t, std::unique_ptr<THeader>, size_t>
+ DuplexChannel::DuplexFramingHandler::removeFrame(folly::IOBufQueue* q) {
+   if (!q || !q->front() || q->front()->empty()) {
+-    return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr);
++    return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr, 0);
+   }
+ 
+   uint32_t len = q->front()->computeChainDataLength();
+ 
+   if (len < 4) {
+     size_t remaining = 4 - len;
+-    return make_tuple(unique_ptr<IOBuf>(), remaining, nullptr);
++    return make_tuple(unique_ptr<IOBuf>(), remaining, nullptr, 0);
+   }
+ 
+   Cursor c(q->front());
+@@ -86,7 +86,7 @@ DuplexChannel::DuplexFramingHandler::removeFrame(folly::IOBufQueue* q) {
+   if (len - 4 < msgLen) {
+     // Framed message, but haven't received whole message yet
+     size_t remaining = msgLen - (len - 4);
+-    return make_tuple(unique_ptr<IOBuf>(), remaining, nullptr);
++    return make_tuple(unique_ptr<IOBuf>(), remaining, nullptr, 0);
+   }
+ 
+   // Got whole message, check if it's header
+diff --git a/thrift/lib/cpp2/async/DuplexChannel.h b/thrift/lib/cpp2/async/DuplexChannel.h
+index 58a6bcb6c0..bfe54f8e9d 100644
+--- a/thrift/lib/cpp2/async/DuplexChannel.h
++++ b/thrift/lib/cpp2/async/DuplexChannel.h
+@@ -184,7 +184,8 @@ class DuplexChannel {
+     std::tuple<
+         std::unique_ptr<folly::IOBuf>,
+         size_t,
+-        std::unique_ptr<apache::thrift::transport::THeader>>
++        std::unique_ptr<apache::thrift::transport::THeader>,
++        size_t>
+     removeFrame(folly::IOBufQueue* q) override;
+ 
+     std::unique_ptr<folly::IOBuf> addFrame(
+diff --git a/thrift/lib/cpp2/async/FramingHandler.cpp b/thrift/lib/cpp2/async/FramingHandler.cpp
+index af3c43d544..d3d86e967d 100644
+--- a/thrift/lib/cpp2/async/FramingHandler.cpp
++++ b/thrift/lib/cpp2/async/FramingHandler.cpp
+@@ -33,9 +33,10 @@ void FramingHandler::read(Context* ctx, folly::IOBufQueue& q) {
+   while (!closing_) {
+     std::unique_ptr<folly::IOBuf> unframed;
+     std::unique_ptr<apache::thrift::transport::THeader> header;
++    size_t frameLength = 0;
+     auto ex = folly::try_and_catch([&]() {
+       // got a decrypted message
+-      std::tie(unframed, remaining, header) = removeFrame(&q);
++      std::tie(unframed, remaining, header, frameLength) = removeFrame(&q);
+     });
+ 
+     if (ex) {
+@@ -45,11 +46,19 @@ void FramingHandler::read(Context* ctx, folly::IOBufQueue& q) {
+       return;
+     }
+ 
++    auto refreshReadBuffer = [&]() {
++      size_t readSize = std::clamp(avgRequestSize_ * kReadBufferMultiplier, size_t(2048), size_t(524288));
++      size_t remainLen = std::max(remaining, q.tailroom());
++      ctx->setReadBufferSettings(readSize, remainLen > 0 ? remainLen : readSize);
++    };
++
+     if (!unframed) {
+-      ctx->setReadBufferSettings(
+-          readBufferSize_, remaining ? remaining : readBufferSize_);
++      refreshReadBuffer();
+       return;
+     } else {
++      avgRequestSize_ = (avgRequestSize_ == 0) ? frameLength :
++          (avgRequestSize_ * (kAvgWindowSamples - 1) + frameLength) / kAvgWindowSamples;
++      refreshReadBuffer();
+       ctx->fireRead(std::make_pair(std::move(unframed), std::move(header)));
+     }
+   }
+diff --git a/thrift/lib/cpp2/async/FramingHandler.h b/thrift/lib/cpp2/async/FramingHandler.h
+index 5184c3103f..276fccfe49 100644
+--- a/thrift/lib/cpp2/async/FramingHandler.h
++++ b/thrift/lib/cpp2/async/FramingHandler.h
+@@ -55,7 +55,8 @@ class FramingHandler
+   virtual std::tuple<
+       std::unique_ptr<folly::IOBuf>,
+       size_t,
+-      std::unique_ptr<apache::thrift::transport::THeader>>
++      std::unique_ptr<apache::thrift::transport::THeader>,
++      size_t>
+   removeFrame(folly::IOBufQueue* q) = 0;
+ 
+   /**
+@@ -88,6 +89,11 @@ class FramingHandler
+   size_t readBufferSize_{DEFAULT_BUFFER_SIZE};
+ 
+   bool closing_{false};
++
++  // 最近请求大小的滑动平均值，用于自适应调整读缓冲区
++  size_t avgRequestSize_{0};
++  static constexpr size_t kAvgWindowSamples = 10;
++  static constexpr size_t kReadBufferMultiplier = 16;
+ };
+ 
+ } // namespace thrift
+diff --git a/thrift/lib/cpp2/async/HeaderClientChannel.cpp b/thrift/lib/cpp2/async/HeaderClientChannel.cpp
+index cab380fbac..da1ec8acb4 100644
+--- a/thrift/lib/cpp2/async/HeaderClientChannel.cpp
++++ b/thrift/lib/cpp2/async/HeaderClientChannel.cpp
+@@ -340,21 +340,22 @@ HeaderClientChannel::ClientFramingHandler::addFrame(
+   return header->addHeader(std::move(buf), persistentWriteHeaders);
+ }
+ 
+-std::tuple<std::unique_ptr<IOBuf>, size_t, std::unique_ptr<THeader>>
++std::tuple<std::unique_ptr<IOBuf>, size_t, std::unique_ptr<THeader>, size_t>
+ HeaderClientChannel::ClientFramingHandler::removeFrame(IOBufQueue* q) {
+   std::unique_ptr<THeader> header(new THeader(THeader::ALLOW_BIG_FRAMES));
+   if (!q || !q->front() || q->front()->empty()) {
+-    return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr);
++    return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr, 0);
+   }
+ 
+   size_t remaining = 0;
++  size_t frameLength = 0;
+   std::unique_ptr<folly::IOBuf> buf =
+-      header->removeHeader(q, remaining, channel_.persistentReadHeaders_);
++      header->removeHeader(q, remaining, channel_.persistentReadHeaders_, frameLength);
+   if (!buf) {
+-    return make_tuple(std::unique_ptr<folly::IOBuf>(), remaining, nullptr);
++    return make_tuple(std::unique_ptr<IOBuf>(), remaining, nullptr, 0);
+   }
+   HeaderChannelTrait::checkSupportedClient(header->getClientType());
+-  return make_tuple(std::move(buf), 0, std::move(header));
++  return make_tuple(std::move(buf), 0, std::move(header), frameLength);
+ }
+ 
+ // Interface from MessageChannel::RecvCallback
+diff --git a/thrift/lib/cpp2/async/HeaderClientChannel.h b/thrift/lib/cpp2/async/HeaderClientChannel.h
+index 863d82799f..1e2202aa91 100644
+--- a/thrift/lib/cpp2/async/HeaderClientChannel.h
++++ b/thrift/lib/cpp2/async/HeaderClientChannel.h
+@@ -243,7 +243,8 @@ class HeaderClientChannel : public ClientChannel,
+     std::tuple<
+         std::unique_ptr<folly::IOBuf>,
+         size_t,
+-        std::unique_ptr<apache::thrift::transport::THeader>>
++        std::unique_ptr<apache::thrift::transport::THeader>,
++        size_t>
+     removeFrame(folly::IOBufQueue* q) override;
+ 
+     std::unique_ptr<folly::IOBuf> addFrame(
+diff --git a/thrift/lib/cpp2/async/HeaderServerChannel.cpp b/thrift/lib/cpp2/async/HeaderServerChannel.cpp
+index ab617fe3d8..13d2f3275e 100644
+--- a/thrift/lib/cpp2/async/HeaderServerChannel.cpp
++++ b/thrift/lib/cpp2/async/HeaderServerChannel.cpp
+@@ -76,20 +76,21 @@ unique_ptr<IOBuf> HeaderServerChannel::ServerFramingHandler::addFrame(
+       false /* Data already transformed in AsyncProcessor.h */);
+ }
+ 
+-std::tuple<unique_ptr<IOBuf>, size_t, unique_ptr<THeader>>
++std::tuple<unique_ptr<IOBuf>, size_t, unique_ptr<THeader>, size_t>
+ HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
+   std::unique_ptr<THeader> header(new THeader(THeader::ALLOW_BIG_FRAMES));
+   // removeHeader will set seqid in header.
+   // For older clients with seqid in the protocol, header
+   // will dig in to the protocol to get the seqid correctly.
+   if (!q || !q->front() || q->front()->empty()) {
+-    return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr);
++    return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr, 0);
+   }
+ 
+   std::unique_ptr<folly::IOBuf> buf;
+   size_t remaining = 0;
++  size_t frameLength = 0;
+   try {
+-    buf = header->removeHeader(q, remaining, channel_.persistentReadHeaders_);
++    buf = header->removeHeader(q, remaining, channel_.persistentReadHeaders_, frameLength);
+   } catch (const std::exception& e) {
+     LOG(ERROR) << "Received invalid request from client: "
+                << folly::exceptionStr(e) << " "
+@@ -97,7 +98,7 @@ HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
+     throw;
+   }
+   if (!buf) {
+-    return make_tuple(std::unique_ptr<IOBuf>(), remaining, nullptr);
++    return make_tuple(std::unique_ptr<IOBuf>(), remaining, nullptr, 0);
+   }
+ 
+   CLIENT_TYPE ct = header->getClientType();
+@@ -143,7 +144,7 @@ HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
+                << getTHeaderPayloadString(buf.get());
+   }
+ 
+-  return make_tuple(std::move(buf), 0, std::move(header));
++  return make_tuple(std::move(buf), 0, std::move(header), frameLength);
+ }
+ 
+ std::string HeaderServerChannel::getTHeaderPayloadString(IOBuf* buf) {
+diff --git a/thrift/lib/cpp2/async/HeaderServerChannel.h b/thrift/lib/cpp2/async/HeaderServerChannel.h
+index e0108b1a3f..190fc139ec 100644
+--- a/thrift/lib/cpp2/async/HeaderServerChannel.h
++++ b/thrift/lib/cpp2/async/HeaderServerChannel.h
+@@ -197,7 +197,8 @@ class HeaderServerChannel : public ServerChannel,
+     std::tuple<
+         std::unique_ptr<folly::IOBuf>,
+         size_t,
+-        std::unique_ptr<apache::thrift::transport::THeader>>
++        std::unique_ptr<apache::thrift::transport::THeader>,
++        size_t>
+     removeFrame(folly::IOBufQueue* q) override;
+ 
+     std::unique_ptr<folly::IOBuf> addFrame(
+diff --git a/thrift/lib/cpp2/async/tests/FramingHandlerTest.cpp b/thrift/lib/cpp2/async/tests/FramingHandlerTest.cpp
+new file mode 100644
+index 0000000000..1967841877
+--- /dev/null
++++ b/thrift/lib/cpp2/async/tests/FramingHandlerTest.cpp
+@@ -0,0 +1,170 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <folly/init/Init.h>
++#include <folly/io/IOBuf.h>
++#include <folly/io/IOBufQueue.h>
++#include <folly/io/async/AsyncSocket.h>
++#include <folly/io/async/EventBase.h>
++#include <folly/portability/GTest.h>
++#include <wangle/channel/Handler.h>
++
++#include <thrift/lib/cpp/transport/THeader.h>
++#include <thrift/lib/cpp2/async/FramingHandler.h>
++#include <thrift/lib/cpp2/async/HeaderServerChannel.h>
++#include <thrift/lib/cpp2/async/HeaderClientChannel.h>
++
++#include <cstring>
++
++using namespace apache::thrift;
++using namespace apache::thrift::transport;
++using namespace folly;
++
++static std::unique_ptr<IOBuf> makeHeaderMsg(size_t sz, THeader::StringToStringMap& h) {
++  THeader hdr;
++  auto buf = IOBuf::create(sz);
++  if (sz > 0) buf->writableData()[0] = 0x80;
++  std::memset(buf->writableData() + 1, 'X', sz > 1 ? sz - 1 : 0);
++  buf->append(sz);
++  return hdr.addHeader(std::move(buf), h);
++}
++
++static std::shared_ptr<AsyncTransport> makeTransport() {
++  static EventBase evb;
++  return AsyncSocket::newSocket(&evb);
++}
++
++// HeaderServerChannel::ServerFramingHandler::removeFrame
++
++TEST(ServerFramingHandlerTest, RemoveFrame) {
++  auto transport = makeTransport();
++  auto channel = HeaderServerChannel::newChannel(transport);
++  HeaderServerChannel::ServerFramingHandler handler(*channel);
++  THeader::StringToStringMap ph; IOBufQueue q;
++  q.append(makeHeaderMsg(100, ph));
++  auto [buf, rem, hdr, fl] = handler.removeFrame(&q);
++  ASSERT_NE(nullptr, buf); EXPECT_GT(fl, 0u);
++}
++
++TEST(ServerFramingHandlerTest, RemoveFrameEmpty) {
++  auto transport = makeTransport();
++  auto channel = HeaderServerChannel::newChannel(transport);
++  HeaderServerChannel::ServerFramingHandler handler(*channel);
++  IOBufQueue q;
++  auto [buf, rem, hdr, fl] = handler.removeFrame(&q);
++  EXPECT_EQ(nullptr, buf); EXPECT_EQ(0u, fl);
++}
++
++TEST(ServerFramingHandlerTest, RemoveFrameNull) {
++  auto transport = makeTransport();
++  auto channel = HeaderServerChannel::newChannel(transport);
++  HeaderServerChannel::ServerFramingHandler handler(*channel);
++  auto [buf, rem, hdr, fl] = handler.removeFrame(nullptr);
++  EXPECT_EQ(nullptr, buf); EXPECT_EQ(0u, fl);
++}
++
++// HeaderClientChannel::ClientFramingHandler::removeFrame
++
++TEST(ClientFramingHandlerTest, RemoveFrameValidMessage) {
++  static EventBase evb;
++  folly::AsyncTransport::UniquePtr transport(folly::AsyncSocket::newSocket(&evb));
++  auto channel = HeaderClientChannel::newChannel(
++      HeaderClientChannel::WithoutRocketUpgrade{}, std::move(transport));
++  HeaderClientChannel::ClientFramingHandler handler(*channel);
++  THeader::StringToStringMap ph; IOBufQueue q;
++  q.append(makeHeaderMsg(100, ph));
++  auto [buf, rem, hdr, fl] = handler.removeFrame(&q);
++  ASSERT_NE(nullptr, buf); EXPECT_GT(fl, 0u);
++}
++
++TEST(ClientFramingHandlerTest, RemoveFrameEmpty) {
++  static EventBase evb;
++  folly::AsyncTransport::UniquePtr transport(folly::AsyncSocket::newSocket(&evb));
++  auto channel = HeaderClientChannel::newChannel(
++      HeaderClientChannel::WithoutRocketUpgrade{}, std::move(transport));
++  HeaderClientChannel::ClientFramingHandler handler(*channel);
++  IOBufQueue q;
++  auto [buf, rem, hdr, fl] = handler.removeFrame(&q);
++  EXPECT_EQ(nullptr, buf); EXPECT_EQ(0u, fl);
++}
++
++TEST(ClientFramingHandlerTest, RemoveFrameNull) {
++  static EventBase evb;
++  folly::AsyncTransport::UniquePtr transport(folly::AsyncSocket::newSocket(&evb));
++  auto channel = HeaderClientChannel::newChannel(
++      HeaderClientChannel::WithoutRocketUpgrade{}, std::move(transport));
++  HeaderClientChannel::ClientFramingHandler handler(*channel);
++  auto [buf, rem, hdr, fl] = handler.removeFrame(nullptr);
++  EXPECT_EQ(nullptr, buf); EXPECT_EQ(0u, fl);
++}
++
++// FramingHandler::read — covers refreshReadBuffer + avgRequestSize_ sliding window
++
++class MockFramingHandler : public FramingHandler {
++ public:
++  std::tuple<std::unique_ptr<IOBuf>, size_t,
++             std::unique_ptr<THeader>, size_t>
++  removeFrame(IOBufQueue* q) override {
++    if (!q || !q->front() || q->front()->empty()) {
++      return {nullptr, 0, nullptr, 0};
++    }
++    size_t len = q->front()->computeChainDataLength();
++    auto buf = q->move();
++    return {std::move(buf), 0, nullptr, len};
++  }
++
++  std::unique_ptr<IOBuf> addFrame(
++      std::unique_ptr<IOBuf> buf, THeader*) override {
++    return buf;
++  }
++
++  uint16_t getProtocolId() { return 0; }
++  CLIENT_TYPE getClientType() { return THRIFT_HEADER_CLIENT_TYPE; }
++};
++
++TEST(FramingHandlerReadTest, ReadWithFullFrame) {
++  auto mockHandler = std::make_shared<MockFramingHandler>();
++  auto pipeline = wangle::Pipeline<IOBufQueue&, std::unique_ptr<IOBuf>>::create();
++  pipeline->addBack(mockHandler);
++  pipeline->finalize();
++
++  IOBufQueue q;
++  auto data = IOBuf::create(100);
++  std::memset(data->writableData(), 'A', 100);
++  data->append(100);
++  q.append(std::move(data));
++  pipeline->read(q);
++  SUCCEED();
++}
++
++TEST(FramingHandlerReadTest, ReadWithPartialFrame) {
++  auto mockHandler = std::make_shared<MockFramingHandler>();
++  auto pipeline = wangle::Pipeline<IOBufQueue&, std::unique_ptr<IOBuf>>::create();
++  pipeline->addBack(mockHandler);
++  pipeline->finalize();
++
++  IOBufQueue q;
++  pipeline->read(q);
++  SUCCEED();
++}
++
++int main(int argc, char** argv) {
++  folly::InitOptions opts;
++  opts.use_gflags = false;
++  folly::init(&argc, &argv, opts);
++  testing::InitGoogleTest(&argc, argv);
++  return RUN_ALL_TESTS();
++}
+diff --git a/thrift/lib/cpp2/test/CMakeLists.txt b/thrift/lib/cpp2/test/CMakeLists.txt
+index 9fe2b288a6..63812492f9 100644
+--- a/thrift/lib/cpp2/test/CMakeLists.txt
++++ b/thrift/lib/cpp2/test/CMakeLists.txt
+@@ -45,4 +45,30 @@ endif()
+ add_test(NAME SerializationTest COMMAND SerializationTest)
+ set_tests_properties(SerializationTest PROPERTIES
+   PASS_REGULAR_EXPRESSION "\\[  PASSED  \\] [0-9]+ tests"
+-)
+\ No newline at end of file
++)
++
++# THeader::removeHeader frameLength tests
++add_executable(THeaderFrameLength-t
++  ../../cpp/transport/test/THeaderFrameLengthTest.cpp
++)
++target_link_libraries(THeaderFrameLength-t
++  transport thriftcpp2 thrift-core rpcmetadata thriftprotocol thrifttype concurrency async
++  Folly::folly
++  GTest::gtest GTest::gtest_main
++  pthread
++)
++
++# FramingHandler / ServerFramingHandler / ClientFramingHandler tests
++add_executable(FramingHandlerTest-t
++  ../async/tests/FramingHandlerTest.cpp
++)
++target_link_libraries(FramingHandlerTest-t
++  thriftcpp2 thrift-core transport async concurrency rpcmetadata thriftprotocol thrifttype thriftannotation thriftanyrep thriftfrozen2 thriftmetadata
++  Folly::folly fizz::fizz wangle::wangle
++  GTest::gtest GTest::gmock
++  event double-conversion
++  boost_context boost_filesystem boost_program_options boost_regex boost_system boost_thread
++  fmt::fmt
++  ssl crypto sodium z zstd lzma
++  dl pthread atomic
++)
+diff --git a/thrift/test/CompressTest.cpp b/thrift/test/CompressTest.cpp
+index be6e373be2..43e98f225a 100644
+--- a/thrift/test/CompressTest.cpp
++++ b/thrift/test/CompressTest.cpp
+@@ -43,6 +43,7 @@ void testMessage(
+   }
+   THeader::StringToStringMap strMap;
+   size_t neaded;
++  size_t frameLength;
+ 
+   for (int i = 0; i < iters; i++) {
+     if (easyMessage) {
+@@ -59,7 +60,7 @@ void testMessage(
+ 
+     auto withHeader = header.addHeader(out.move(), strMap);
+     out.append(std::move(withHeader));
+-    auto buf = header.removeHeader(&out, neaded, strMap);
++    auto buf = header.removeHeader(&out, neaded, strMap, frameLength);
+ 
+     if (binary) {
+       BinarySerializer::deserialize(buf.get(), bin);
+@@ -92,10 +93,11 @@ void testChainedCompression(uint8_t flag, int iters) {
+   printf("%i\n", (int)compressed->length());
+ 
+   size_t needed = 0;
++  size_t frameLength2 = 0;
+   folly::IOBufQueue q;
+   q.append(std::move(compressed));
+ 
+-  auto uncompressed = header.removeHeader(&q, needed, persistentHeaders);
++  auto uncompressed = header.removeHeader(&q, needed, persistentHeaders, frameLength2);
+   EXPECT_NE(uncompressed, nullptr);
+   EXPECT_EQ(needed, 0);
+   EXPECT_TRUE(q.empty());
+diff --git a/thrift/test/THeaderTest.cpp b/thrift/test/THeaderTest.cpp
+index 63df5efa64..5e9ee269bc 100644
+--- a/thrift/test/THeaderTest.cpp
++++ b/thrift/test/THeaderTest.cpp
+@@ -39,8 +39,9 @@ TEST(THeaderTest, removeBadHeaderStringSize) {
+   // Try to remove the bad header
+   THeader header;
+   size_t needed;
++  size_t frameLength;
+   THeader::StringToStringMap persistentHeaders;
+   EXPECT_THROW(
+-      auto buf = header.removeHeader(&queue, needed, persistentHeaders),
++      auto buf = header.removeHeader(&queue, needed, persistentHeaders, frameLength),
+       TTransportException);
+ }

@@ -43,6 +43,7 @@ void testMessage(
   }
   THeader::StringToStringMap strMap;
   size_t neaded;
+  size_t frameLength;
 
   for (int i = 0; i < iters; i++) {
     if (easyMessage) {
@@ -59,7 +60,7 @@ void testMessage(
 
     auto withHeader = header.addHeader(out.move(), strMap);
     out.append(std::move(withHeader));
-    auto buf = header.removeHeader(&out, neaded, strMap);
+    auto buf = header.removeHeader(&out, neaded, strMap, frameLength);
 
     if (binary) {
       BinarySerializer::deserialize(buf.get(), bin);
@@ -92,10 +93,11 @@ void testChainedCompression(uint8_t flag, int iters) {
   printf("%i\n", (int)compressed->length());
 
   size_t needed = 0;
+  size_t frameLength2 = 0;
   folly::IOBufQueue q;
   q.append(std::move(compressed));
 
-  auto uncompressed = header.removeHeader(&q, needed, persistentHeaders);
+  auto uncompressed = header.removeHeader(&q, needed, persistentHeaders, frameLength2);
   EXPECT_NE(uncompressed, nullptr);
   EXPECT_EQ(needed, 0);
   EXPECT_TRUE(q.empty());

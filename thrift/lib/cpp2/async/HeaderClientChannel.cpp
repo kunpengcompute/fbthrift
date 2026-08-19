@@ -340,21 +340,22 @@ HeaderClientChannel::ClientFramingHandler::addFrame(
   return header->addHeader(std::move(buf), persistentWriteHeaders);
 }
 
-std::tuple<std::unique_ptr<IOBuf>, size_t, std::unique_ptr<THeader>>
+std::tuple<std::unique_ptr<IOBuf>, size_t, std::unique_ptr<THeader>, size_t>
 HeaderClientChannel::ClientFramingHandler::removeFrame(IOBufQueue* q) {
   std::unique_ptr<THeader> header(new THeader(THeader::ALLOW_BIG_FRAMES));
   if (!q || !q->front() || q->front()->empty()) {
-    return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr);
+    return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr, 0);
   }
 
   size_t remaining = 0;
+  size_t frameLength = 0;
   std::unique_ptr<folly::IOBuf> buf =
-      header->removeHeader(q, remaining, channel_.persistentReadHeaders_);
+      header->removeHeader(q, remaining, channel_.persistentReadHeaders_, frameLength);
   if (!buf) {
-    return make_tuple(std::unique_ptr<folly::IOBuf>(), remaining, nullptr);
+    return make_tuple(std::unique_ptr<IOBuf>(), remaining, nullptr, 0);
   }
   HeaderChannelTrait::checkSupportedClient(header->getClientType());
-  return make_tuple(std::move(buf), 0, std::move(header));
+  return make_tuple(std::move(buf), 0, std::move(header), frameLength);
 }
 
 // Interface from MessageChannel::RecvCallback

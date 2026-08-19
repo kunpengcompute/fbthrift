@@ -55,7 +55,8 @@ class FramingHandler
   virtual std::tuple<
       std::unique_ptr<folly::IOBuf>,
       size_t,
-      std::unique_ptr<apache::thrift::transport::THeader>>
+      std::unique_ptr<apache::thrift::transport::THeader>,
+      size_t>
   removeFrame(folly::IOBufQueue* q) = 0;
 
   /**
@@ -73,6 +74,7 @@ class FramingHandler
    *                         means given size may not be used if it is too small
    */
   void setReadBufferSize(size_t readBufferSize, bool strict = false) {
+    strict_ = strict;
     readBufferSize_ = strict
         ? readBufferSize
         : std::max<size_t>(readBufferSize, DEFAULT_BUFFER_SIZE);
@@ -86,8 +88,14 @@ class FramingHandler
   };
 
   size_t readBufferSize_{DEFAULT_BUFFER_SIZE};
+  bool strict_{false};
 
   bool closing_{false};
+
+  // 最近请求大小的滑动平均值，用于自适应调整读缓冲区
+  size_t avgRequestSize_{0};
+  static constexpr size_t kAvgWindowSamples = 10;
+  static constexpr size_t kReadBufferMultiplier = 16;
 };
 
 } // namespace thrift

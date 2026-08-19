@@ -76,20 +76,21 @@ unique_ptr<IOBuf> HeaderServerChannel::ServerFramingHandler::addFrame(
       false /* Data already transformed in AsyncProcessor.h */);
 }
 
-std::tuple<unique_ptr<IOBuf>, size_t, unique_ptr<THeader>>
+std::tuple<unique_ptr<IOBuf>, size_t, unique_ptr<THeader>, size_t>
 HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
   std::unique_ptr<THeader> header(new THeader(THeader::ALLOW_BIG_FRAMES));
   // removeHeader will set seqid in header.
   // For older clients with seqid in the protocol, header
   // will dig in to the protocol to get the seqid correctly.
   if (!q || !q->front() || q->front()->empty()) {
-    return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr);
+    return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr, 0);
   }
 
   std::unique_ptr<folly::IOBuf> buf;
   size_t remaining = 0;
+  size_t frameLength = 0;
   try {
-    buf = header->removeHeader(q, remaining, channel_.persistentReadHeaders_);
+    buf = header->removeHeader(q, remaining, channel_.persistentReadHeaders_, frameLength);
   } catch (const std::exception& e) {
     LOG(ERROR) << "Received invalid request from client: "
                << folly::exceptionStr(e) << " "
@@ -97,7 +98,7 @@ HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
     throw;
   }
   if (!buf) {
-    return make_tuple(std::unique_ptr<IOBuf>(), remaining, nullptr);
+    return make_tuple(std::unique_ptr<IOBuf>(), remaining, nullptr, 0);
   }
 
   CLIENT_TYPE ct = header->getClientType();
@@ -143,7 +144,7 @@ HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
                << getTHeaderPayloadString(buf.get());
   }
 
-  return make_tuple(std::move(buf), 0, std::move(header));
+  return make_tuple(std::move(buf), 0, std::move(header), frameLength);
 }
 
 std::string HeaderServerChannel::getTHeaderPayloadString(IOBuf* buf) {

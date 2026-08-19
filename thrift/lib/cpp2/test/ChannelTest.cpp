@@ -112,30 +112,30 @@ class EventBaseAborter : public folly::AsyncTimeout {
 // Creates/unwraps a framed message (LEN(MSG) | MSG)
 class TestFramingHandler : public FramingHandler {
  public:
-  std::tuple<unique_ptr<IOBuf>, size_t, unique_ptr<THeader>> removeFrame(
+  std::tuple<unique_ptr<IOBuf>, size_t, unique_ptr<THeader>, size_t> removeFrame(
       IOBufQueue* q) override {
     assert(q);
     queue_.append(*q);
     if (!queue_.front() || queue_.front()->empty()) {
-      return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr);
+      return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr, 0);
     }
 
     uint32_t len = queue_.front()->computeChainDataLength();
 
     if (len < 4) {
       size_t remaining = 4 - len;
-      return make_tuple(unique_ptr<IOBuf>(), remaining, nullptr);
+      return make_tuple(unique_ptr<IOBuf>(), remaining, nullptr, 0);
     }
 
     folly::io::Cursor c(queue_.front());
     uint32_t msgLen = c.readBE<uint32_t>();
     if (len - 4 < msgLen) {
       size_t remaining = msgLen - (len - 4);
-      return make_tuple(unique_ptr<IOBuf>(), remaining, nullptr);
+      return make_tuple(unique_ptr<IOBuf>(), remaining, nullptr, 0);
     }
 
     queue_.trimStart(4);
-    return make_tuple(queue_.split(msgLen), 0, nullptr);
+    return make_tuple(queue_.split(msgLen), 0, nullptr, 0);
   }
 
   unique_ptr<IOBuf> addFrame(unique_ptr<IOBuf> buf, THeader*) override {

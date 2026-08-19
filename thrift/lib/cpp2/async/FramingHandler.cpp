@@ -33,9 +33,10 @@ void FramingHandler::read(Context* ctx, folly::IOBufQueue& q) {
   while (!closing_) {
     std::unique_ptr<folly::IOBuf> unframed;
     std::unique_ptr<apache::thrift::transport::THeader> header;
+    size_t frameLength = 0;
     auto ex = folly::try_and_catch([&]() {
       // got a decrypted message
-      std::tie(unframed, remaining, header) = removeFrame(&q);
+      std::tie(unframed, remaining, header, frameLength) = removeFrame(&q);
     });
 
     if (ex) {
@@ -45,11 +46,24 @@ void FramingHandler::read(Context* ctx, folly::IOBufQueue& q) {
       return;
     }
 
+    auto refreshReadBuffer = [&]() {
+      size_t readSize;
+      if (strict_) {
+        readSize = readBufferSize_;
+      } else {
+        readSize = std::clamp(avgRequestSize_ * kReadBufferMultiplier, size_t{2048}, size_t{524288});
+      }
+      size_t remainLen = std::max(remaining, q.tailroom());
+      ctx->setReadBufferSettings(readSize, remainLen > 0 ? remainLen : readSize);
+    };
+
     if (!unframed) {
-      ctx->setReadBufferSettings(
-          readBufferSize_, remaining ? remaining : readBufferSize_);
+      refreshReadBuffer();
       return;
     } else {
+      avgRequestSize_ = (avgRequestSize_ == 0) ? frameLength :
+          (avgRequestSize_ * (kAvgWindowSamples - 1) + frameLength) / kAvgWindowSamples;
+      refreshReadBuffer();
       ctx->fireRead(std::make_pair(std::move(unframed), std::move(header)));
     }
   }

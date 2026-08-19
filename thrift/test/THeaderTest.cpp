@@ -39,8 +39,9 @@ TEST(THeaderTest, removeBadHeaderStringSize) {
   // Try to remove the bad header
   THeader header;
   size_t needed;
+  size_t frameLength;
   THeader::StringToStringMap persistentHeaders;
   EXPECT_THROW(
-      auto buf = header.removeHeader(&queue, needed, persistentHeaders),
+      auto buf = header.removeHeader(&queue, needed, persistentHeaders, frameLength),
       TTransportException);
 }

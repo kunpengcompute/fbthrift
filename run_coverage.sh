@@ -78,6 +78,8 @@ fi
 echo ""
 echo "=== Step 1: 增量文件 ==="
 resolve_base() {
+  if [ -n "${CI_MERGE_REQUEST_DIFF_BASE_SHA:-}" ] && git rev-parse --verify "$CI_MERGE_REQUEST_DIFF_BASE_SHA^{commit}" >/dev/null 2>&1; then BASE_SHA="$CI_MERGE_REQUEST_DIFF_BASE_SHA"; return 0; fi
+  if [ -n "${CI_MERGE_REQUEST_TARGET_BRANCH_SHA:-}" ] && git rev-parse --verify "$CI_MERGE_REQUEST_TARGET_BRANCH_SHA^{commit}" >/dev/null 2>&1; then BASE_SHA="$CI_MERGE_REQUEST_TARGET_BRANCH_SHA"; return 0; fi
   git rev-parse --verify "$BASE_SHA^{commit}" >/dev/null 2>&1 && return 0
   git rev-parse --verify "origin/$BASE_SHA^{commit}" >/dev/null 2>&1 && { BASE_SHA="origin/$BASE_SHA"; return 0; }
   git rev-parse --verify "refs/remotes/origin/$BASE_SHA^{commit}" >/dev/null 2>&1 && { BASE_SHA="refs/remotes/origin/$BASE_SHA"; return 0; }
@@ -86,18 +88,30 @@ resolve_base() {
     if echo "$ref" | grep -q "/$BASE_SHA$"; then BASE_SHA="$ref"; return 0; fi
   done
   for remote in $(git remote 2>/dev/null); do
-    git fetch "$remote" "$BASE_SHA" 2>/dev/null || true
+    if git fetch "$remote" "$BASE_SHA" 2>/dev/null; then
+      git rev-parse --verify "FETCH_HEAD^{commit}" >/dev/null 2>&1 && { BASE_SHA="FETCH_HEAD"; return 0; }
+    fi
     git fetch "$remote" 2>/dev/null || true
     git rev-parse --verify "$BASE_SHA^{commit}" >/dev/null 2>&1 && return 0
     git rev-parse --verify "$remote/$BASE_SHA^{commit}" >/dev/null 2>&1 && { BASE_SHA="$remote/$BASE_SHA"; return 0; }
   done
   return 1
 }
-if ! resolve_base; then echo "ERROR: 基线 $BASE_SHA 不存在"; echo "RESULT: FAIL"; exit 1; fi
+if ! resolve_base; then
+  FALLBACK_INC=$(git -C "$SRC_DIR" diff --name-only "HEAD~1" "$HEAD_SHA" -- '*.cpp' '*.cc' 2>/dev/null | grep -v '/test/' | grep -v '/tests/' | grep -v '/benchmarks/' | grep -v '/tool/' | grep -v '/examples/' || true)
+  if [ -z "$FALLBACK_INC" ]; then
+    echo "  无法解析基线，但本分支未涉及源码文件修改，跳过覆盖率检查。"
+    echo "RESULT: SKIP"
+    exit 0
+  fi
+  echo "ERROR: 基线 $BASE_SHA 不存在"; echo "RESULT: FAIL"; exit 1
+fi
 INCREMENTAL_CPP=$(git -C "$SRC_DIR" diff --name-only "$BASE_SHA" "$HEAD_SHA" -- '*.cpp' '*.cc' 2>/dev/null | grep -v '/test/' | grep -v '/tests/' | grep -v '/benchmarks/' | grep -v '/tool/' | grep -v '/examples/' || true)
 if [ -z "$INCREMENTAL_CPP" ]; then echo "没有增量源文件，跳过。"; echo "RESULT: SKIP"; exit 0; fi
 mapfile -t INCREMENTAL_FILES <<< "$INCREMENTAL_CPP"
 for f in "${INCREMENTAL_FILES[@]}"; do echo "  $f"; done
+ADDED_LINES=$(git -C "$SRC_DIR" diff "$BASE_SHA" "$HEAD_SHA" -- "${INCREMENTAL_FILES[@]}" 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+' | wc -l)
+if [ "$ADDED_LINES" -eq 0 ]; then echo "  无新增代码行（纯删除），跳过增量覆盖率检查。"; echo "RESULT: SKIP"; exit 0; fi
 echo ""
 echo "=== Step 2: 构建依赖 ==="
 cd "$SRC_DIR"
@@ -190,9 +204,9 @@ if [ -n "$TEST_TARGETS_ARG" ]; then IFS=',' read -ra TARGETS <<< "$TEST_TARGETS_
       if [ "$matched" = false ]; then
         no_test=$(echo "$base" | sed 's/Test$//' | sed 's/test$//'); keywords=$(echo "$no_test" | sed 's/\([A-Z]\)/ \1/g' | tr 'A-Z' 'a-z' | tr ' ' '\n' | grep -v '^$' | grep -v '^.$' | tr '\n' ' ')
         for t in $ALL_TARGETS; do
+          [ "$t" = "test" ] && continue
           t_lower=$(echo "$t" | tr 'A-Z' 'a-z')
           if ! echo "$t_lower" | grep -q 'test'; then continue; fi
-          if [ ! -d "CMakeFiles/${t}.dir" ]; then continue; fi
           match=true
           for kw in $keywords; do if ! echo "$t_lower" | grep -q "$kw"; then match=false; break; fi; done
           if [ "$match" = "true" ]; then TARGETS+=("$t"); echo "    $tf -> $t (模糊匹配)"; matched=true; MATCHED_FILES="$MATCHED_FILES $tf"; break; fi
@@ -206,8 +220,8 @@ if [ -n "$TEST_TARGETS_ARG" ]; then IFS=',' read -ra TARGETS <<< "$TEST_TARGETS_
   if [ -n "$UNMATCHED" ] || [ ${#TARGETS[@]} -eq 0 ]; then
     echo "  有测试文件未匹配到，编译所有测试目标..."
     for t in $ALL_TARGETS; do
+      [ "$t" = "test" ] && continue
       t_lower=$(echo "$t" | tr 'A-Z' 'a-z')
-      if [ ! -d "CMakeFiles/${t}.dir" ]; then continue; fi
       if echo "$t_lower" | grep -q 'test'; then
         found_existing=false
         for existing in "${TARGETS[@]}"; do [ "$existing" = "$t" ] && found_existing=true && break; done

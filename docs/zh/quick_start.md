@@ -1,19 +1,19 @@
 # 快速入门
 
-> 适用版本：v1.2.0
+> 适用版本：FbThrift v1.2.0
 
-本文指导用户从零构建带四项请求链路优化的FbThrift，并编译、启动配套Benchmark。四项优化包括动态收包缓冲区、Folly IOBuf TLS内存池、ThreadManager direct-func和请求热路径去锁。
+本文档指导用户从零构建带四项请求链路优化的FbThrift，并编译、启动配套Benchmark。四项优化包括动态收包缓冲区、Folly IOBuf TLS内存池、ThreadManager direct-func和请求热路径去锁。
 
 ## 1. 获取公共Benchmark仓库
 
-统一从公共仓库获取Benchmark与自动构建脚本：
+统一从公共仓库获取Benchmark与自动构建脚本。
 
 ```bash
 git clone https://gitcode.com/donghuanan/AccLibBenchmark.git
 cd AccLibBenchmark
 ```
 
-仓库中与FbThrift相关的两个目录职责如下：
+仓库中与FbThrift相关的两个目录职责如下。
 
 - [fbthrift_folly_benchmark](https://gitcode.com/donghuanan/AccLibBenchmark/tree/master/fbthrift_folly_benchmark)：存放`press.thrift`、CMake配置、`press_client`和`press_server`源码。
 - [fb_folly_autobuild](https://gitcode.com/donghuanan/AccLibBenchmark/tree/master/fb_folly_autobuild)：存放`install.py`自动构建脚本、`run.py`性能矩阵脚本及使用说明。
@@ -30,7 +30,7 @@ AccLibBenchmark/
     └── run.py
 ```
 
-> **优化补丁：** `install.py`要求同目录存在`fbthrift.patch`。请将v1.2.0发布包提供的优化补丁放到`fb_folly_autobuild/fbthrift.patch`；缺少该文件时脚本会停止，构建出的FbThrift也不会包含完整优化。
+> **优化补丁：** `install.py`要求同目录存在`fbthrift.patch`。请将FbThrift v1.2.0发布包提供的优化补丁放到`fb_folly_autobuild/fbthrift.patch`；缺少该文件时脚本会停止，构建出的FbThrift也不会包含完整优化。
 
 ## 2. 编译环境
 
@@ -38,11 +38,11 @@ AccLibBenchmark/
 
 ### 2.1 安装系统依赖
 
-Debian或Ubuntu执行：
+- Debian或Ubuntu执行以下命令。
 
-```bash
-sudo apt-get update
-sudo apt-get install -y \
+  ```bash
+  sudo apt-get update
+  sudo apt-get install -y \
   git cmake build-essential pkg-config xz-utils numactl \
   liburing-dev libboost-all-dev libdouble-conversion-dev \
   libgflags-dev libgoogle-glog-dev libevent-dev libsodium-dev \
@@ -50,12 +50,12 @@ sudo apt-get install -y \
   libgtest-dev libgmock-dev libssl-dev libaio-dev \
   libunwind-dev libdwarf-dev binutils-dev libiberty-dev \
   zlib1g-dev libbz2-dev
-```
+  ```
 
-openEuler或其他RPM系统执行：
+- openEuler或其他RPM系统执行以下命令。
 
-```bash
-sudo dnf install -y \
+  ```bash
+  sudo dnf install -y \
   git cmake make gcc gcc-c++ pkgconf-pkg-config numactl \
   fmt fmt-devel glog glog-devel gflags gflags-devel \
   libevent libevent-devel double-conversion double-conversion-devel \
@@ -63,11 +63,11 @@ sudo dnf install -y \
   lz4 lz4-devel zstd zstd-devel libsodium libsodium-devel \
   liburing liburing-devel libatomic zlib zlib-devel \
   openssl openssl-devel
-```
+  ```
 
 ### 2.2 准备Clang 16
 
-优先使用系统已安装的Clang 16：
+优先使用系统已安装的Clang 16。
 
 ```bash
 clang-16 --version
@@ -77,7 +77,7 @@ export CC="$(command -v clang-16)"
 export CXX="$(command -v clang++-16)"
 ```
 
-如果系统没有Clang 16，可使用与目标架构匹配的LLVM二进制包。Folly、Fizz、Wangle、FbThrift和Benchmark必须使用同一组`CC`、`CXX`。
+>**说明**：如果系统没有Clang 16，可使用与目标架构匹配的LLVM二进制包。Folly、Fizz、Wangle、FbThrift和Benchmark必须使用同一组`CC`、`CXX`。
 
 ## 3. 手动编译
 
@@ -93,13 +93,13 @@ export ACCLIB="$WORK/AccLibBenchmark"
 mkdir -p "$WORK" "$INS"
 ```
 
-如果公共仓库尚未下载到`$ACCLIB`：
+如果公共仓库尚未下载到`$ACCLIB`，执行以下命令获取。
 
 ```bash
 git clone https://gitcode.com/donghuanan/AccLibBenchmark.git "$ACCLIB"
 ```
 
-最终目录关系如下：
+最终目录关系如下。
 
 ```text
 $WORK/
@@ -115,31 +115,33 @@ $WORK/
     └── fbthrift/
 ```
 
-### 3.2 下载依赖源码
+### 3.2 下载依赖并应用补丁
 
-```bash
-git clone --recurse-submodules --branch dev_iouring --single-branch \
-  https://gitcode.com/boostkit/folly.git "$WORK/folly"
+1. 下载依赖源码。
 
-git clone --recurse-submodules --branch v2022.11.14.00 --single-branch \
-  https://github.com/facebookincubator/fizz.git "$WORK/fizz"
+   ```bash
+   git clone --recurse-submodules --branch dev_iouring --single-branch \
+   https://gitcode.com/boostkit/folly.git "$WORK/folly"
 
-git clone --recurse-submodules --branch v2022.11.14.00 --single-branch \
-  https://github.com/facebook/wangle.git "$WORK/wangle"
+   git clone --recurse-submodules --branch v2022.11.14.00 --single-branch \
+   https://github.com/facebookincubator/fizz.git "$WORK/fizz"
 
-git clone --recurse-submodules --branch dev_20221114 --single-branch \
-  https://gitcode.com/boostkit/fbthrift.git "$WORK/fbthrift"
-```
+   git clone --recurse-submodules --branch v2022.11.14.00 --single-branch \
+   https://github.com/facebook/wangle.git "$WORK/wangle"
 
-应用v1.2.0优化补丁：
+   git clone --recurse-submodules --branch dev_20221114 --single-branch \
+   https://gitcode.com/boostkit/fbthrift.git "$WORK/fbthrift"
+   ```
 
-```bash
-cd "$WORK/fbthrift"
-git apply --check "$ACCLIB/fb_folly_autobuild/fbthrift.patch"
-git apply --3way "$ACCLIB/fb_folly_autobuild/fbthrift.patch"
-```
+2. 应用FbThrift v1.2.0优化补丁。
 
-如果`git apply --reverse --check`能够成功，说明补丁已经应用，不应重复执行。
+   ```bash
+    cd "$WORK/fbthrift"
+    git apply --check "$ACCLIB/fb_folly_autobuild/fbthrift.patch"
+    git apply --3way "$ACCLIB/fb_folly_autobuild/fbthrift.patch"
+    ```
+
+   如果`git apply --reverse --check`能够成功，说明补丁已经应用，不应重复执行。
 
 ### 3.3 编译Folly
 
@@ -220,7 +222,7 @@ cmake -S "$BENCH" -B "$BENCH/build" \
 cmake --build "$BENCH/build" --parallel "$(nproc)"
 ```
 
-构建完成后应存在：
+构建完成后应存在以下内容。
 
 ```text
 $BENCH/build/press_server
@@ -231,7 +233,7 @@ $BENCH/build/press_client
 
 ### 3.8 启动并验证Benchmark
 
-在服务端和客户端终端中都先设置运行环境：
+在服务端和客户端终端中都先设置运行环境。
 
 ```bash
 export WORK=/home/your-user/fbthrift-work
@@ -240,80 +242,84 @@ export BENCH="$WORK/AccLibBenchmark/fbthrift_folly_benchmark"
 export LD_LIBRARY_PATH="$INS/fbthrift/lib:$INS/fbthrift/lib64:$INS/wangle/lib:$INS/wangle/lib64:$INS/fizz/lib:$INS/fizz/lib64:$INS/folly/lib:$INS/folly/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ```
 
-先启动服务端：
+1. 先启动服务端。
 
-```bash
-"$BENCH/build/press_server" \
-  --port=23456 \
-  --num_io_threads=12 \
-  --num_cpu_threads=12
-```
+   ```bash
+   "$BENCH/build/press_server" \
+   --port=23456 \
+   --num_io_threads=12 \
+   --num_cpu_threads=12
+   ```
 
-另开终端运行客户端：
+2. 另开终端运行客户端。
 
-```bash
-"$BENCH/build/press_client" \
-  --host=127.0.0.1 \
-  --port=23456 \
-  --transport=header \
-  --fields=none \
-  --payload_size=1024 \
-  --connections=100 \
-  --queue_depth=10 \
-  --io_threads=12 \
-  --cpu_threads=12 \
-  --test_seconds=30 \
-  --compression=none
-```
+   ```bash
+   "$BENCH/build/press_client" \
+   --host=127.0.0.1 \
+   --port=23456 \
+   --transport=header \
+   --fields=none \
+   --payload_size=1024 \
+   --connections=100 \
+   --queue_depth=10 \
+   --io_threads=12 \
+   --cpu_threads=12 \
+   --test_seconds=30 \
+   --compression=none
+   ```
 
 输出中应包含`Success`、`Fail`、`QPS`、`Throughput`和延迟分位数。先确认`Fail=0`，再扩大连接数、测试时长和Payload。Rocket测试只需将`--transport=header`改为`rocket`。
 
 需要验证io_uring时，客户端和服务端都增加`--use_io_uring=true`，并确认Folly及系统`liburing`支持该路径。
 
-## 4. 脚本编译
+## 4. 编译脚本
 
 脚本方式适合重复构建、修改源码后重编以及批量运行性能矩阵。
 
 ### 4.1 准备脚本与补丁
 
-```bash
-git clone https://gitcode.com/donghuanan/AccLibBenchmark.git
-cd AccLibBenchmark/fb_folly_autobuild
-```
+1. 执行以下命令。
 
-确认以下文件存在：
+   ```bash
+   git clone https://gitcode.com/donghuanan/AccLibBenchmark.git
+   cd AccLibBenchmark/fb_folly_autobuild
+   ```
 
-```bash
-test -f install.py
-test -f run.py
-test -f fbthrift.patch
-```
+2. 确认以下文件存在。
 
-其中`fbthrift.patch`需要由v1.2.0发布包提供并放到当前目录。
+   ```bash
+   test -f install.py
+   test -f run.py
+   test -f fbthrift.patch
+   ```
+
+其中`fbthrift.patch`需要由FbThrift v1.2.0发布包提供并放到当前目录。
 
 ### 4.2 适配公共仓库目录
 
-公共仓库的Benchmark位于脚本同级目录，而当前`install.py`默认把另一个Benchmark仓库直接克隆到`WORK/fbthrift_folly_benchmark`。使用本公共仓库时，应让脚本直接使用已下载的兄弟目录：
+公共仓库的Benchmark位于脚本同级目录，而当前`install.py`默认把另一个Benchmark仓库直接克隆到`WORK/fbthrift_folly_benchmark`。
 
-```python
-BENCHMARK_DIR = SCRIPT_DIR.parent / "fbthrift_folly_benchmark"
-```
+1. 使用本公共仓库时，应让脚本直接使用已下载的兄弟目录。
 
-同时将`prepare_benchmark_source()`调整为只检查本地工程：
+   ```python
+   BENCHMARK_DIR = SCRIPT_DIR.parent / "fbthrift_folly_benchmark"
+   ```
 
-```python
-def prepare_benchmark_source():
+2. 同时将`prepare_benchmark_source()`调整为只检查本地工程。
+
+   ```python
+   def prepare_benchmark_source():
     if not (BENCHMARK_DIR / "CMakeLists.txt").is_file():
         raise FileNotFoundError(
             "benchmark source not found: {}".format(BENCHMARK_DIR)
         )
-```
+   ```
 
 这样脚本不会再次克隆其他Benchmark仓库，手动与脚本方式都会使用公共仓库中的同一份`fbthrift_folly_benchmark`源码。
 
 ### 4.3 配置install.py
 
-至少确认以下配置：
+至少确认以下配置。
 
 ```python
 WORK = Path("/data/your-user/fbthrift-work")
@@ -334,37 +340,41 @@ THRIFT_ENABLE_ARM_SVE2 = True
 
 ### 4.4 执行自动构建
 
-```bash
-cd AccLibBenchmark/fb_folly_autobuild
-python3 install.py
-```
+1. 执行以下命令。
 
-脚本依次完成系统依赖检查、Clang探测、源码下载、优化补丁应用、Folly/Fizz/Wangle/FbThrift安装、Thrift代码生成和Benchmark编译。
+   ```bash
+   cd AccLibBenchmark/fb_folly_autobuild
+   python3 install.py
+   ```
 
-成功后检查：
+   脚本依次完成系统依赖检查、Clang探测、源码下载、优化补丁应用、Folly/Fizz/Wangle/FbThrift安装、Thrift代码生成和Benchmark编译。
 
-```text
-WORK/ins/fbthrift/bin/thrift1
-AccLibBenchmark/fbthrift_folly_benchmark/build/press_server
-AccLibBenchmark/fbthrift_folly_benchmark/build/press_client
-```
+2. 成功后检查。
 
-源码目录已经存在时，`AUTO_REENTRY=True`会复用Git checkout并保留本地修改。更换编译器或出现CMake Cache冲突时，只清理各组件的构建目录，再重新运行脚本，不要删除源码目录。
+   ```text
+   WORK/ins/fbthrift/bin/thrift1
+   AccLibBenchmark/fbthrift_folly_benchmark/build/press_server
+   AccLibBenchmark/fbthrift_folly_benchmark/build/press_client
+   ```
+
+   源码目录已经存在时，`AUTO_REENTRY=True`会复用Git checkout并保留本地修改。更换编译器或出现CMake Cache冲突时，只清理各组件的构建目录，再重新运行脚本，不要删除源码目录。
 
 ### 4.5 使用run.py执行性能矩阵
 
-运行前修改`run.py`中的：
+1. 运行前修改`run.py`中的以下内容。
 
-- `EXECUTABLE`：指向实际的`press_client`。
-- `PREFIX_CMD`：确认服务端IP、端口、transport、NUMA节点和io_uring开关。
-- `CONN_SETUPS`、`QD_SETUPS`、`DATA_SETUPS`：先使用小矩阵验证环境。
-- `OUTPUT_CSV`：设置结果文件名称，避免覆盖已有结果。
+   - `EXECUTABLE`：指向实际的`press_client`。
+   - `PREFIX_CMD`：确认服务端IP、端口、transport、NUMA节点和io_uring开关。
+   - `CONN_SETUPS`、`QD_SETUPS`、`DATA_SETUPS`：先使用小矩阵验证环境。
+   - `OUTPUT_CSV`：设置结果文件名称，避免覆盖已有结果。
 
-先按3.8节启动`press_server`，再执行：
+2. 先按3.8节启动`press_server`，再执行以下命令。
 
-```bash
-cd AccLibBenchmark/fb_folly_autobuild
-python3 run.py
-```
+   ```bash
+   cd AccLibBenchmark/fb_folly_autobuild
+   python3 run.py
+   ```
 
-脚本会逐项运行`press_client`，并将QPS、吞吐量、平均延迟、P99延迟、成功率及客户端/服务端CPU利用率写入CSV。
+   脚本会逐项运行`press_client`，并将QPS、吞吐量、平均延迟、P99延迟、成功率及客户端/服务端CPU利用率写入CSV。
+
+## 修订记录

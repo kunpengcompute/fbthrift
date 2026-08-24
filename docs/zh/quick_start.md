@@ -1,6 +1,6 @@
 # 快速入门
 
-> 适用版本：FbThrift v1.2.0
+> 适用版本：FbThrift v1.1.0
 
 本文档指导用户从零构建带四项请求链路优化的FbThrift，并编译、启动配套Benchmark。四项优化包括动态收包缓冲区、Folly IOBuf TLS内存池、ThreadManager direct-func和请求热路径去锁。
 
@@ -13,7 +13,7 @@ git clone https://gitcode.com/donghuanan/AccLibBenchmark.git
 cd AccLibBenchmark
 ```
 
-仓库中与FbThrift相关的两个目录职责如下。
+仓库中与FbThrift相关的两个目录职责如下。(若无权限请联系管理员申请并说明原因。)
 
 - [fbthrift_folly_benchmark](https://gitcode.com/donghuanan/AccLibBenchmark/tree/master/fbthrift_folly_benchmark)：存放`press.thrift`、CMake配置、`press_client`和`press_server`源码。
 - [fb_folly_autobuild](https://gitcode.com/donghuanan/AccLibBenchmark/tree/master/fb_folly_autobuild)：存放`install.py`自动构建脚本、`run.py`性能矩阵脚本及使用说明。
@@ -26,12 +26,12 @@ AccLibBenchmark/
 │   ├── client/
 │   └── server/
 └── fb_folly_autobuild/
+    ├── fbthrift.patch
     ├── install.py
     └── run.py
 ```
 
-> **优化补丁：** `install.py`要求同目录存在`fbthrift.patch`。请将FbThrift v1.2.0发布包提供的优化补丁放到`fb_folly_autobuild/fbthrift.patch`；缺少该文件时脚本会停止，构建出的FbThrift也不会包含完整优化。
-
+> **优化补丁：** 脚本默认含优化代码版本，若有需要，请将fbthrift.patch放在install.py同目录下，脚本支持自动补全补丁。
 ## 2. 编译环境
 
 推荐准备至少30GB可用磁盘空间，并确保构建机可以通过HTTPS访问GitCode和GitHub。
@@ -133,7 +133,7 @@ $WORK/
    https://gitcode.com/boostkit/fbthrift.git "$WORK/fbthrift"
    ```
 
-2. 应用FbThrift v1.2.0优化补丁。
+2. 应用FbThrift v1.1.0优化补丁。
 
    ```bash
     cd "$WORK/fbthrift"
@@ -293,7 +293,7 @@ export LD_LIBRARY_PATH="$INS/fbthrift/lib:$INS/fbthrift/lib64:$INS/wangle/lib:$I
    test -f fbthrift.patch
    ```
 
-其中`fbthrift.patch`需要由FbThrift v1.2.0发布包提供并放到当前目录。
+其中`fbthrift.patch`需要由FbThrift v1.1.0发布包提供并放到当前目录。
 
 ### 4.2 适配公共仓库目录
 
@@ -378,3 +378,7 @@ THRIFT_ENABLE_ARM_SVE2 = True
    脚本会逐项运行`press_client`，并将QPS、吞吐量、平均延迟、P99延迟、成功率及客户端/服务端CPU利用率写入CSV。
 
 ## 修订记录
+|发布日期|修订记录|
+| :---| :---|
+|2026-9-30|第二次正式发布:<br>• 基于echo client的完整端到端rpc的自写benchmark，统计QPS，吞吐量，rpc的时延包括平均值，p50,p90,p99等，支持本地回环与双机直连。<br>• 自动化编译依赖库，目标库，benchmark的脚本。<br>• benchmark的运行脚本与自动采集数据并输出excel表格。|
+|2026-6-30|第一次正式发布:<br>• 早期性能基准测试benchmark基于google开源benchmark框架对binary与compact协议下的徐磊话反序列化时延进行统计。<br>• benchmark运行脚本。|

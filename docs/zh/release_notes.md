@@ -22,7 +22,7 @@
 </tr>
 <tr id="row34726251"><th class="firstcol" valign="top" width="42.17%" id="mcps1.1.3.2.1"><p id="p56669300"><a name="p56669300"></a><a name="p56669300"></a>软件版本</p>
 </th>
-<td class="cellrowborder" valign="top" width="57.830000000000005%" headers="mcps1.1.3.2.1 "><p id="p11923034"><a name="p11923034"></a><a name="p11923034"></a><span id="text189831542174711"><a name="text189831542174711"></a><a name="text189831542174711"></a>v1.2.0</span></p>
+<td class="cellrowborder" valign="top" width="57.830000000000005%" headers="mcps1.1.3.2.1 "><p id="p11923034"><a name="p11923034"></a><a name="p11923034"></a><span id="text189831542174711"><a name="text189831542174711"></a><a name="text189831542174711"></a>v1.1.0</span></p>
 </td>
 </tr>
 </tbody>
@@ -37,20 +37,20 @@
 > **说明：** Binary Protocol优化不依赖SVE2指令集，在所有aarch64和x86-64平台上均可通过编译器自动向量化获得性能提升。Compact Protocol的SVE2优化仅在支持SVE2指令集的CPU上生效，不支持时自动回退到scalar路径。
 
 ### 病毒扫描结果
-
+不涉及软件包发布，不涉及病毒扫描。
 xxx
 
 ## 版本兼容性说明
 
-### FbThrift v1.2.0兼容性与风险说明
+### FbThrift v1.1.0兼容性与风险说明
 
 - ThreadManager保留原有`FunctionRunner`和`std::shared_ptr<Runnable>`接口；如出现兼容性问题，可通过`--thrift_thread_manager_direct_func_enabled=false`回退。
 - `THeader::removeHeader()`新增`frameLength`引用参数，`FramingHandler::removeFrame()`返回值由三元组扩展为四元组。自定义调用方、派生类及Python/Cython绑定必须同步修改后重新编译。
 - Header自适应逻辑会刷新Pipeline读缓冲设置，依赖`setReadBufferSize()`固定值的业务需要执行专项回归。
 - 2KB至512KB范围、16倍倍率及10样本权重为当前经验参数，建议结合实际请求大小和延迟目标继续压测调优。
-- PR 11合入前需完成空队列长度获取、Python/Cython与ChannelTest签名同步、CTest注册等审查项，确保异常路径和新增测试能够进入持续集成。
 
 **关联变更**
+完整代码及测试报告，设计原理等详情见pr链接：
 
 - [PR 10：优化ThreadManager folly::Func任务调度](https://gitcode.com/boostkit/fbthrift/pull/10)
 - [PR 11：增加帧长透传与自适应读缓冲](https://gitcode.com/boostkit/fbthrift/pull/11)
@@ -61,9 +61,9 @@ xxx
 
 ## 版本更新说明
 
-### FbThrift v1.2.0
+### FbThrift v1.1.0
 
-#### FbThrift v1.2.0新增特性
+#### FbThrift v1.1.0新增特性
 
 |特性描述|更新说明|
 |--|--|
@@ -73,18 +73,6 @@ xxx
 |Header帧长度透传|`THeader::removeHeader()`新增`frameLength`输出参数，HeaderClientChannel、HeaderServerChannel及DuplexChannel将完整帧长度透传至FramingHandler。|
 |Header自适应读缓冲|`FramingHandler::read()`根据帧长度维护10样本权重的滑动平均值，以平均帧长16倍动态设置读缓冲，并将范围限制在2KB至512KB。|
 |专项单元测试|ThreadManager新增5个直接调度专项UT；Header帧长和FramingHandler补充14个测试源码用例，覆盖正常帧、空队列、空指针、分帧及自适应计算路径。|
-
-#### FbThrift v1.2.0性能验证参考
-
-ThreadManager优化在鲲鹏950处理器测试环境完成Header与Rocket交替A/B验证。测试结果如下表所示，数据用于说明当前基准场景的收益，不作为所有业务负载的固定性能承诺。
-
-|测试协议|性能指标|平均变化|
-|--|--|--|
-|Header|QPS|提升12.21%|
-|Header|吞吐量|提升12.21%|
-|Header|P99延迟|降低10.25%|
-|Rocket|QPS|提升2.67%|
-|Rocket|服务端CPU效率|提升10.07%|
 
 ### FbThrift v1.0.0
 
@@ -106,7 +94,7 @@ ThreadManager优化在鲲鹏950处理器测试环境完成Header与Rocket交替A
 
 ## 版本配套文档
 
-### FbThrift v1.2.0版本配套文档
+### FbThrift v1.1.0版本配套文档
 
 <a name="table1191773710200"></a>
 <table><thead align="left"><tr id="row1291816372202"><th class="cellrowborder" valign="top" width="45.019999999999996%" id="mcps1.1.4.1.1"><p id="p291823714205"><a name="p291823714205"></a><a name="p291823714205"></a>文档名称</p>
@@ -143,7 +131,7 @@ ThreadManager优化在鲲鹏950处理器测试环境完成Header与Rocket交替A
 
 ### FbThrift v1.0.0版本配套文档
 
-xxx
+当前文档已包含先前文档。
 
 ### 获取文档的方法
 

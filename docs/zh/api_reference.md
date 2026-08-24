@@ -1,10 +1,10 @@
 # API参考
 
-## FbThrift v1.2.0
+## FbThrift v1.1.0
 
-> 本章介绍FbThrift v1.2.0新增的ThreadManager任务调度与Header帧处理接口。
+> 本章介绍FbThrift v1.1.0新增的ThreadManager任务调度与Header帧处理接口。
 
-### FbThrift v1.2.0接口介绍
+### FbThrift v1.1.0接口介绍
 
 |接口名称|所属模块|接口说明|
 |--|--|--|
@@ -67,7 +67,7 @@ const std::shared_ptr<Runnable>& ThreadManager::Task::getRunnable() const;
 
 ##### THeader::removeHeader函数功能
 
-从`IOBufQueue`中解析Header帧。除返回消息数据和待补充字节数外，FbThrift v1.2.0新增`frameLength`输出参数，用于向上层传递本次完整帧的实际长度。空帧或数据不完整时返回0。
+从`IOBufQueue`中解析Header帧。除返回消息数据和待补充字节数外，FbThrift v1.1.0新增`frameLength`输出参数，用于向上层传递本次完整帧的实际长度。空帧或数据不完整时返回0。
 
 ##### THeader::removeHeader函数定义
 
@@ -105,7 +105,7 @@ virtual std::tuple<
 removeFrame(folly::IOBufQueue* queue) = 0;
 ```
 
-四个返回项依次为消息数据、仍需读取的字节数、Header对象和完整帧长度。该接口由三元组扩展为四元组，所有自定义派生类及调用方必须同步更新签名和结构化绑定。
+该接口由三元组扩展为四元组，四个返回项依次为消息数据、仍需读取的字节数、Header对象和完整帧长度，与上文THeader::removeHeader同步改动，size_t& frameLength帧长度是唯一新增变量。
 
 #### FramingHandler::read自适应策略
 
@@ -121,7 +121,7 @@ readSize = std::clamp(avgRequestSize_ * 16, size_t(2048), size_t(524288));
 
 计算结果用于刷新Pipeline读缓冲设置，缓冲区范围限制为2KB至512KB。不完整帧场景还会综合`remaining`与队列尾部可用空间，减少大帧的重复读取，同时避免小请求长期占用过大的固定缓冲区。
 
-> **兼容性说明：** 自适应逻辑会在读路径中刷新缓冲设置。依赖`setReadBufferSize()`固定缓冲区语义的调用方，应在升级到FbThrift v1.2.0时执行回归验证。
+> **兼容性说明：** 自适应逻辑会在读路径中刷新缓冲设置。依赖`setReadBufferSize()`固定缓冲区语义的调用方，应在升级到FbThrift v1.1.0时执行回归验证。
 
 ## FbThrift v1.0.0
 
@@ -371,3 +371,7 @@ void writeBeContiguous(folly::io::QueueAppender& out, const T* data, uint32_t si
 对于不满足上述条件的类型或容器，SFINAE机制自动回退到原有的逐元素序列化循环，确保兼容性。
 
 ## 修订记录
+|发布日期|修订记录|
+| :---| :---|
+|2026-9-30|第二次正式发布:<br>• 动态首保缓冲区：减少recv()调用 <br>• Threadmanager direct-func: 减少任务包装|
+|2026-6-30|第一次正式发布:<br>• 增加compact和binary protocol对list数据类型没有批量处理的机制 <br>• 增加SVE2实现的variant encode函数|

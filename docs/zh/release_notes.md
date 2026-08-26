@@ -48,11 +48,6 @@
 - Header自适应逻辑会刷新Pipeline读缓冲设置，依赖`setReadBufferSize()`固定值的业务需要执行专项回归。
 - 2KB至512KB范围、16倍倍率及10样本权重为当前经验参数，建议结合实际请求大小和延迟目标继续压测调优。
 
-**关联变更**
-完整代码及测试报告，设计原理等详情见pr链接：
-
-- [PR 10：优化ThreadManager folly::Func任务调度](https://gitcode.com/boostkit/fbthrift/pull/10)
-- [PR 11：增加帧长透传与自适应读缓冲](https://gitcode.com/boostkit/fbthrift/pull/11)
 
 ## 版本使用注意事项
 

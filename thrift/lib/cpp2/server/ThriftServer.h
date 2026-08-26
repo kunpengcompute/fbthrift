@@ -41,6 +41,9 @@
 #include <folly/io/async/AsyncServerSocket.h>
 #include <folly/io/async/EventBase.h>
 #include <folly/io/async/EventBaseManager.h>
+#ifdef FOLLY_HAVE_URMA
+#include <folly/io/async/urma/UrmaConfig.h>
+#endif
 #include <folly/lang/Badge.h>
 #include <folly/synchronization/CallOnce.h>
 #include <thrift/lib/cpp/concurrency/PosixThreadFactory.h>
@@ -177,6 +180,13 @@ class ThriftServer : public apache::thrift::BaseThriftServer,
   bool allowCheckUnimplementedExtraInterfaces_ = true;
 
   bool preferIoUring_ = false;
+
+  // URMA (UB RDMA) 配置
+  // useUrma_=true 时,setup() 内部初始化 urma,accept 后创建 UrmaAsyncSocket
+#ifdef FOLLY_HAVE_URMA
+  bool useUrma_ = false;
+  folly::UrmaConfig urmaConfig_;
+#endif
 
   std::weak_ptr<folly::ShutdownSocketSet> wShutdownSocketSet_;
 
@@ -640,6 +650,18 @@ class ThriftServer : public apache::thrift::BaseThriftServer,
   void setPreferIoUring(bool b) { preferIoUring_ = b; }
 
   bool preferIoUring() const { return preferIoUring_; }
+
+#ifdef FOLLY_HAVE_URMA
+  /**
+   * 启用 URMA 传输。必须在 serve()/setup() 之前调用。
+   * 启用后,accept 的连接会走 URMA 握手,read/write 走 UB RDMA。
+   * 约束: 不支持 TLS;服务端走正常 peeking/routing(Rocket/Header/...);
+   */
+  void setUseUrma(bool b) { useUrma_ = b; }
+  bool useUrma() const { return useUrma_; }
+  void setUrmaConfig(const folly::UrmaConfig& c) { urmaConfig_ = c; }
+  const folly::UrmaConfig& getUrmaConfig() const { return urmaConfig_; }
+#endif
 
   /**
    * Tells the thrift server to update ticket seeds with the contents of the

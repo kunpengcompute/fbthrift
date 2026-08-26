@@ -371,6 +371,7 @@ void writeBeContiguous(folly::io::QueueAppender& out, const T* data, uint32_t si
 对于不满足上述条件的类型或容器，SFINAE机制自动回退到原有的逐元素序列化循环，确保兼容性。
 
 ## 修订记录
+
 |发布日期|修订记录|
 | :---| :---|
 |2026-9-30|第二次正式发布:<br>• 动态首保缓冲区：减少recv()调用 <br>• Threadmanager direct-func: 减少任务包装|

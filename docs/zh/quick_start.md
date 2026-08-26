@@ -32,6 +32,7 @@ AccLibBenchmark/
 ```
 
 > **优化补丁：** 脚本默认含优化代码版本，若有需要，请将fbthrift.patch放在install.py同目录下，脚本支持自动补全补丁。
+
 ## 2. 编译环境
 
 推荐准备至少30GB可用磁盘空间，并确保构建机可以通过HTTPS访问GitCode和GitHub。
@@ -378,6 +379,7 @@ THRIFT_ENABLE_ARM_SVE2 = True
    脚本会逐项运行`press_client`，并将QPS、吞吐量、平均延迟、P99延迟、成功率及客户端/服务端CPU利用率写入CSV。
 
 ## 修订记录
+
 |发布日期|修订记录|
 | :---| :---|
 |2026-9-30|第二次正式发布:<br>• 基于echo client的完整端到端rpc的自写benchmark，统计QPS，吞吐量，rpc的时延包括平均值，p50,p90,p99等，支持本地回环与双机直连。<br>• 自动化编译依赖库，目标库，benchmark的脚本。<br>• benchmark的运行脚本与自动采集数据并输出excel表格。|

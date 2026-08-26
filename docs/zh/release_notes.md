@@ -37,6 +37,7 @@
 > **说明：** Binary Protocol优化不依赖SVE2指令集，在所有aarch64和x86-64平台上均可通过编译器自动向量化获得性能提升。Compact Protocol的SVE2优化仅在支持SVE2指令集的CPU上生效，不支持时自动回退到scalar路径。
 
 ### 病毒扫描结果
+
 不涉及软件包发布，不涉及病毒扫描。
 
 ## 版本兼容性说明
@@ -47,7 +48,6 @@
 - `THeader::removeHeader()`新增`frameLength`引用参数，`FramingHandler::removeFrame()`返回值由三元组扩展为四元组。自定义调用方、派生类及Python/Cython绑定必须同步修改后重新编译。
 - Header自适应逻辑会刷新Pipeline读缓冲设置，依赖`setReadBufferSize()`固定值的业务需要执行专项回归。
 - 2KB至512KB范围、16倍倍率及10样本权重为当前经验参数，建议结合实际请求大小和延迟目标继续压测调优。
-
 
 ## 版本使用注意事项
 

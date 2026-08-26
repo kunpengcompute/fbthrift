@@ -380,7 +380,7 @@ THRIFT_ENABLE_ARM_SVE2 = True
 
 ## 修订记录
 
-|发布日期|修订记录|
-| :---| :---|
-|2026-9-30|第二次正式发布:<br>• 基于echo client的完整端到端rpc的自写benchmark，统计QPS，吞吐量，rpc的时延包括平均值，p50,p90,p99等，支持本地回环与双机直连。<br>• 自动化编译依赖库，目标库，benchmark的脚本。<br>• benchmark的运行脚本与自动采集数据并输出excel表格。|
-|2026-6-30|第一次正式发布:<br>• 早期性能基准测试benchmark基于google开源benchmark框架对binary与compact协议下的徐磊话反序列化时延进行统计。<br>• benchmark运行脚本。|
+|文档版本|发布日期|修改说明|
+| :---| :---| :---|
+|02|2026-9-30|第二次正式发布:<br>• 基于echo client的完整端到端rpc的自写benchmark，统计QPS，吞吐量，rpc的时延包括平均值，p50,p90,p99等，支持本地回环与双机直连。<br>• 自动化编译依赖库，目标库，benchmark的脚本。<br>• benchmark的运行脚本与自动采集数据并输出excel表格。|
+|01|2026-6-30|第一次正式发布:<br>• 早期性能基准测试benchmark基于google开源benchmark框架对binary与compact协议下的徐磊话反序列化时延进行统计。<br>• benchmark运行脚本。|

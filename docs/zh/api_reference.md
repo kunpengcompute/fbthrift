@@ -374,5 +374,4 @@ void writeBeContiguous(folly::io::QueueAppender& out, const T* data, uint32_t si
 
 |文档版本|发布日期|修改说明|
 | :---| :---| :---|
-|02|2026-9-30|第二次正式发布:<br>• 动态首保缓冲区：减少recv()调用 <br>• Threadmanager direct-func: 减少任务包装|
-|01|2026-6-30|第一次正式发布:<br>• 增加compact和binary protocol对list数据类型没有批量处理的机制 <br>• 增加SVE2实现的variant encode函数|
+|01|2026-9-30|第一次正式发布:<br>• 动态首保缓冲区：减少recv()调用 <br>• Threadmanager direct-func: 减少任务包装|

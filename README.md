@@ -79,4 +79,4 @@ FbThrift遵循Apache-2.0许可证，具体请参见[LICENSE文件](LICENSE)。
 
 ## 致谢
 
-感谢来自社区的每一个PR，欢迎贡献FbThrift补丁仓！
+感谢来自社区的每一个PR，欢迎贡献FbThrift！

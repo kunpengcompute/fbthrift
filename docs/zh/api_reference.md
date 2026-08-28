@@ -373,5 +373,5 @@ void writeBeContiguous(folly::io::QueueAppender& out, const T* data, uint32_t si
 ## 修订记录
 
 |文档版本|发布日期|修改说明|
-| :---| :---| :---|
-|01|2026-9-30|第一次正式发布:<br>• 动态首保缓冲区：减少recv()调用 <br>• Threadmanager direct-func: 减少任务包装|
+|:---|:---|:---|
+|01|2026-9-30|第一次正式发布。|

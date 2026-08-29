@@ -1,5 +1,7 @@
 # Introduction to fbthrift Serialization Optimization
 
+English|[简体中文](README.md)
+
 ## Latest Updates
 
 - [2026-06-30]: Released the patch repository v1.0.0 based on Meta's open-source fbthrift serialization. This optimization targets the fbthrift serialization framework to perform batch integer array encoding, significantly improving serialization performance through the Arm SVE2 instruction set and automatic compiler vectorization.

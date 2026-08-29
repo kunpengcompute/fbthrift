@@ -1,0 +1,4274 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 766130e072db2f7ea2d7c57448f937e4b254f6de..3edc4584cb74581c5754cf9917bac642727d6265 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -63,6 +63,33 @@ set(CMAKE_CXX_STANDARD 17)
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ set(CMAKE_CXX_EXTENSIONS OFF)
+ 
++# -----------------------------------------------------------------------------
++# Optional ARM SVE2 acceleration for varint list encoders.
++#
++# When THRIFT_ENABLE_ARM_SVE2=ON on an aarch64 host, a single translation
++# unit (thrift/lib/cpp2/protocol/CompactProtocolSve.cpp) is compiled with
++#   -march=armv8-a+sve2-bitperm
++# and with the preprocessor flag THRIFT_HAS_ARM_SVE2 defined. That TU
++# contains the SVE2 kernels plus a runtime CPU-capability probe. All other
++# TUs - inside fbthrift as well as downstream consumers (benchmarks,
++# services, etc.) - keep their default compile flags and reach the SVE2
++# fast path purely through exported dispatch function symbols. This
++# completely removes the need for downstream projects to specify any ARM
++# feature flags, which previously caused unrelated codegen changes (for
++# example in the varint *deserialization* path).
++# -----------------------------------------------------------------------------
++option(THRIFT_ENABLE_ARM_SVE2
++  "Enable ARM SVE2 accelerated varint list encoders (aarch64 only)"
++  OFF)
++set(THRIFT_ARM_SVE2_FLAGS "")
++if(THRIFT_ENABLE_ARM_SVE2 AND
++   CMAKE_SYSTEM_PROCESSOR MATCHES "(aarch64|arm64|AArch64|ARM64)")
++  set(THRIFT_ARM_SVE2_FLAGS "-march=armv8-a+sve2-bitperm")
++  message(STATUS
++    "Thrift: ARM SVE2 enabled for CompactProtocolSve.cpp via "
++    "${THRIFT_ARM_SVE2_FLAGS}. Other TUs keep default compile flags.")
++endif()
++
+ # Enable modular builds
+ option(compiler_only "Build the Thrift Compiler only" OFF)
+ option(lib_only "Build the Thrift Libraries only" OFF)
+diff --git a/run_coverage.sh b/run_coverage.sh
+new file mode 100644
+index 0000000000000000000000000000000000000000..9f07980ad8aa7e10da045392ed0ef3ee394e2f7f
+--- /dev/null
++++ b/run_coverage.sh
+@@ -0,0 +1,354 @@
++#!/bin/bash
++set -u -o pipefail
++export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:${PATH:-}"
++if ! command -v git >/dev/null 2>&1; then apt-get update -qq 2>/dev/null; apt-get install -y -qq git 2>/dev/null; fi
++BASE_SHA="${1:-HEAD~1}"
++MIN_COVERAGE="${2:-80}"
++TEST_TARGETS_ARG="${3:-}"
++SRC_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
++HEAD_SHA="$(git rev-parse HEAD 2>/dev/null || echo 'unknown')"
++BUILD_DIR="build_"
++echo "============================================"
++echo "  fbthrift 增量覆盖率检查（全自动）"
++echo "============================================"
++echo "  源码:   $SRC_DIR"
++echo "  基线:   ${BASE_SHA:0:12}"
++echo "  当前:   ${HEAD_SHA:0:12}"
++echo "  阈值:   ${MIN_COVERAGE}%"
++echo "============================================"
++echo ""
++echo "=== 换源 ==="
++cat > /etc/apt/sources.list << 'EOF'
++deb https://mirrors.tuna.tsinghua.edu.cn/debian bookworm main contrib non-free non-free-firmware
++deb https://mirrors.tuna.tsinghua.edu.cn/debian bookworm-updates main contrib non-free non-free non-free-firmware
++deb http://mirrors.aliyun.com/debian-security bookworm-security main contrib non-free non-free-firmware
++EOF
++apt-get update -qq 2>/dev/null
++if ! grep -q 'gh-proxy.test.osinfra.cn' /root/.gitconfig 2>/dev/null; then
++  cat >> /root/.gitconfig << 'EOF'
++[url "https://gh-proxy.test.osinfra.cn/https://github.com/"]
++insteadOf = https://github.com/
++EOF
++fi
++echo "  源已切换"
++echo ""
++echo "=== Step 0: 安装依赖 ==="
++apt-get update -qq 2>/dev/null
++for pkg in libboost-all-dev libdouble-conversion-dev libgflags-dev libgoogle-glog-dev libevent-dev libsodium-dev liblz4-dev libsnappy-dev liblzma-dev libgtest-dev libgmock-dev libssl-dev libaio-dev make clang-16 cmake clang libunwind-dev libdwarf-dev binutils-dev libiberty-dev zlib1g-dev libbz2-dev unzip libzstd-dev libfmt-dev python3 python3-six cython3 libxxhash-dev; do
++  if ! apt-get install -y --fix-missing "$pkg" >/tmp/apt_install.log 2>&1; then
++    apt-get update -qq 2>/dev/null
++    apt-get install -y --fix-missing "$pkg" >/tmp/apt_install.log 2>&1 || echo "  警告: $pkg 安装失败"
++  fi
++done
++export CC=/usr/bin/clang-16
++export CXX=/usr/bin/clang++-16
++if [ ! -e /usr/bin/clang ]; then ln -sf /usr/bin/clang-16 /usr/bin/clang 2>/dev/null || true; fi
++if [ ! -e /usr/bin/clang++ ]; then ln -sf /usr/bin/clang++-16 /usr/bin/clang++ 2>/dev/null || true; fi
++PROFDATA=""
++COV=""
++for v in 16 18 17 14 ""; do
++  if command -v "llvm-profdata-$v" >/dev/null 2>&1; then PROFDATA="llvm-profdata-$v"; COV="llvm-cov-$v"; break
++  elif [ -z "$v" ] && command -v llvm-profdata >/dev/null 2>&1; then PROFDATA="llvm-profdata"; COV="llvm-cov"; break; fi
++done
++if [ -z "$PROFDATA" ]; then
++  apt-get install -y -qq llvm 2>/dev/null
++  for v in 16 18 17 14 ""; do
++    if command -v "llvm-profdata-$v" >/dev/null 2>&1; then PROFDATA="llvm-profdata-$v"; COV="llvm-cov-$v"; break; fi
++  done
++fi
++if ! find /usr -name 'libgtest.a' 2>/dev/null | grep -q .; then
++  if [ -d /usr/src/googletest ]; then (cd /usr/src/googletest && cmake . 2>/dev/null && make 2>/dev/null && make install 2>/dev/null); fi
++fi
++GMOCK_LIB=$(find /usr -name 'libgmock.a' 2>/dev/null | head -1)
++GMOCK_MAIN_LIB=$(find /usr -name 'libgmock_main.a' 2>/dev/null | head -1)
++GTEST_LIB=$(find /usr -name 'libgtest.a' 2>/dev/null | head -1)
++GTEST_MAIN_LIB=$(find /usr -name 'libgtest_main.a' 2>/dev/null | head -1)
++GTEST_INCLUDE_DIR=$(find /usr/include -name 'gtest.h' 2>/dev/null | head -1 | xargs dirname 2>/dev/null | xargs dirname 2>/dev/null)
++GMOCK_INCLUDE_DIR="${GTEST_INCLUDE_DIR}/gmock"
++if [ -n "$GMOCK_LIB" ]; then
++  export LIBGMOCK_LIBRARY="$GMOCK_LIB"; export LIBGMOCK_MAIN_LIBRARY="$GMOCK_MAIN_LIB"; export LIBGTEST_LIBRARY="$GTEST_LIB"; export LIBGTEST_MAIN_LIBRARY="$GTEST_MAIN_LIB"; export GMOCK_INCLUDE_DIR="$GMOCK_INCLUDE_DIR"; export GTEST_INCLUDE_DIR="$GTEST_INCLUDE_DIR"
++fi
++echo "  CC=$CC CXX=$CXX"
++echo "  $PROFDATA / $COV"
++if [ -z "$PROFDATA" ] || [ -z "$COV" ]; then
++  echo "ERROR: llvm-profdata/llvm-cov 未找到"
++  echo "RESULT: FAIL"
++  exit 1
++fi
++echo ""
++echo "=== Step 1: 增量文件 ==="
++resolve_base() {
++  git rev-parse --verify "$BASE_SHA^{commit}" >/dev/null 2>&1 && return 0
++  git rev-parse --verify "origin/$BASE_SHA^{commit}" >/dev/null 2>&1 && { BASE_SHA="origin/$BASE_SHA"; return 0; }
++  git rev-parse --verify "refs/remotes/origin/$BASE_SHA^{commit}" >/dev/null 2>&1 && { BASE_SHA="refs/remotes/origin/$BASE_SHA"; return 0; }
++  git rev-parse --verify "refs/remotes/fork/$BASE_SHA^{commit}" >/dev/null 2>&1 && { BASE_SHA="refs/remotes/fork/$BASE_SHA"; return 0; }
++  for ref in $(git for-each-ref --format='%(refname:short)' refs/remotes 2>/dev/null); do
++    if echo "$ref" | grep -q "/$BASE_SHA$"; then BASE_SHA="$ref"; return 0; fi
++  done
++  for remote in $(git remote 2>/dev/null); do
++    git fetch "$remote" "$BASE_SHA" 2>/dev/null || true
++    git fetch "$remote" 2>/dev/null || true
++    git rev-parse --verify "$BASE_SHA^{commit}" >/dev/null 2>&1 && return 0
++    git rev-parse --verify "$remote/$BASE_SHA^{commit}" >/dev/null 2>&1 && { BASE_SHA="$remote/$BASE_SHA"; return 0; }
++  done
++  return 1
++}
++if ! resolve_base; then echo "ERROR: 基线 $BASE_SHA 不存在"; echo "RESULT: FAIL"; exit 1; fi
++INCREMENTAL_CPP=$(git -C "$SRC_DIR" diff --name-only "$BASE_SHA" "$HEAD_SHA" -- '*.cpp' '*.cc' 2>/dev/null | grep -v '/test/' | grep -v '/tests/' | grep -v '/benchmarks/' | grep -v '/tool/' | grep -v '/examples/' || true)
++if [ -z "$INCREMENTAL_CPP" ]; then echo "没有增量源文件，跳过。"; echo "RESULT: SKIP"; exit 0; fi
++mapfile -t INCREMENTAL_FILES <<< "$INCREMENTAL_CPP"
++for f in "${INCREMENTAL_FILES[@]}"; do echo "  $f"; done
++echo ""
++echo "=== Step 2: 构建依赖 ==="
++cd "$SRC_DIR"
++if [ ! -f /usr/local/lib/libzstd.a ]; then
++  echo "  编译 zstd..."
++  if ! wget --no-check-certificate -q -O /tmp/zstd.tar.gz https://buildtools.obs.cn-north-4.myhuaweicloud.com/zstd-1.4.5.tar.gz; then echo "ERROR: 下载 zstd 失败"; exit 1; fi
++  tar xzf /tmp/zstd.tar.gz && cd zstd-1.4.5
++  if ! make -j"$(nproc)" >/tmp/build_zstd.log 2>&1; then tail -3 /tmp/build_zstd.log; echo "ERROR: zstd 编译失败"; exit 1; fi
++  if ! make PREFIX=/usr/local/ install 2>&1 | tail -1; then echo "ERROR: install 失败"; exit 1; fi
++  cd "$SRC_DIR"
++fi
++if [ ! -d /usr/local/fmt ]; then
++  echo "  编译 fmt..."
++  if ! wget --no-check-certificate -q -O /tmp/fmt.tar.gz https://buildtools.obs.cn-north-4.myhuaweicloud.com/fmt-8.0.1.tar.gz; then echo "ERROR: 下载 fmt 失败"; exit 1; fi
++  tar xzf /tmp/fmt.tar.gz && cd fmt-8.0.1; mkdir -p build && cd build
++  cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local/fmt 2>&1 | tail -3
++  if ! make -j"$(nproc)" >/tmp/build_fmt.log 2>&1; then tail -3 /tmp/build_fmt.log; echo "ERROR: fmt 编译失败"; exit 1; fi
++  if ! make install 2>&1 | tail -1; then echo "ERROR: install 失败"; exit 1; fi
++  cd "$SRC_DIR"
++fi
++if [ ! -f /usr/local/lib/libz.a ]; then
++  echo "  编译 zlib..."
++  if ! wget --no-check-certificate -q -O /tmp/zlib.tar.gz https://buildtools.obs.cn-north-4.myhuaweicloud.com/zlib-1.2.13.tar.gz; then echo "ERROR: 下载 zlib 失败"; exit 1; fi
++  tar xzf /tmp/zlib.tar.gz && cd zlib-1.2.13
++  CFLAGS="-Wno-error" ./configure --prefix=/usr/local/ 2>&1 | tail -3
++  if ! make -j"$(nproc)" >/tmp/build_zlib.log 2>&1; then tail -3 /tmp/build_zlib.log; echo "ERROR: zlib 编译失败"; exit 1; fi
++  if ! make install 2>&1 | tail -1; then echo "ERROR: install 失败"; exit 1; fi
++  cd "$SRC_DIR"
++fi
++if [ ! -d /usr/local/boost_1_78_0 ]; then
++  echo "  编译 boost（需要几分钟）..."
++  if ! wget --no-check-certificate -q -O /tmp/boost.tar.gz https://buildtools.obs.cn-north-4.myhuaweicloud.com/boost_1_78_0.tar.gz; then echo "ERROR: 下载 boost 失败"; exit 1; fi
++  tar xzf /tmp/boost.tar.gz && cd boost_1_78_0
++  ./bootstrap.sh --with-toolset=clang --prefix=/usr/local/boost_1_78_0 2>&1 | tail -3
++  if ! ./b2 install >/tmp/build_boost.log 2>&1; then tail -3 /tmp/build_boost.log; echo "ERROR: boost 编译失败"; exit 1; fi
++  cd "$SRC_DIR"
++fi
++if [ ! -d /usr/local/folly ]; then
++  echo "  编译 folly..."
++  if ! wget --no-check-certificate -q -O /tmp/folly.zip https://buildtools.obs.cn-north-4.myhuaweicloud.com/folly-2022.11.14.00.zip; then echo "ERROR: 下载 folly 失败"; exit 1; fi
++  unzip -q /tmp/folly.zip; cd folly-2022.11.14.00; mkdir -p _build && cd _build
++  cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=17 -DBUILD_BENCHMARKS=OFF -DBUILD_TESTS=OFF -DCMAKE_INSTALL_PREFIX=/usr/local/folly -DBUILD_SHARED_LIBS=ON -DCMAKE_PREFIX_PATH="/usr/local/fmt/lib/cmake/fmt/" 2>&1 | tail -5
++  if ! make -j"$(nproc)" >/tmp/build_folly.log 2>&1; then tail -5 /tmp/build_folly.log; echo "ERROR: folly 编译失败"; exit 1; fi
++  if ! make install 2>&1 | tail -1; then echo "ERROR: install 失败"; exit 1; fi
++  cd "$SRC_DIR"
++fi
++if [ ! -d /usr/local/fizz ]; then
++  echo "  编译 fizz..."
++  if ! wget --no-check-certificate -q -O /tmp/fizz.zip https://buildtools.obs.cn-north-4.myhuaweicloud.com/fizz-2022.11.14.00.zip; then echo "ERROR: 下载 fizz 失败"; exit 1; fi
++  unzip -q /tmp/fizz.zip; cd fizz-2022.11.14.00; mkdir -p build_ && cd build_
++  cmake ../fizz/ -Dfmt_DIR=/usr/local/fmt/lib/cmake/fmt -Dfolly_DIR=/usr/local/folly/lib/cmake/folly -DCMAKE_INSTALL_PREFIX=/usr/local/fizz 2>&1 | tail -5
++  if ! make -j"$(nproc)" >/tmp/build_fizz.log 2>&1; then tail -5 /tmp/build_fizz.log; echo "ERROR: fizz 编译失败"; exit 1; fi
++  if ! make install 2>&1 | tail -1; then echo "ERROR: install 失败"; exit 1; fi
++  cd "$SRC_DIR"
++fi
++if [ ! -d /usr/local/wangle ]; then
++  echo "  编译 wangle..."
++  if ! wget --no-check-certificate -q -O /tmp/wangle.zip https://buildtools.obs.cn-north-4.myhuaweicloud.com/wangle-2022.11.14.00.zip; then echo "ERROR: 下载 wangle 失败"; exit 1; fi
++  unzip -q /tmp/wangle.zip; cd wangle-2022.11.14.00; mkdir -p build_ && cd build_
++  cmake ../wangle -Dfmt_DIR=/usr/local/fmt/lib/cmake/fmt -Dfolly_DIR=/usr/local/folly/lib/cmake/folly -Dfizz_DIR=/usr/local/fizz/lib/cmake/fizz -DCMAKE_INSTALL_PREFIX=/usr/local/wangle -DBUILD_SHARED_LIBS=ON 2>&1 | tail -5
++  if ! make -j"$(nproc)" >/tmp/build_wangle.log 2>&1; then tail -5 /tmp/build_wangle.log; echo "ERROR: wangle 编译失败"; exit 1; fi
++  if ! make install 2>&1 | tail -1; then echo "ERROR: install 失败"; exit 1; fi
++  cd "$SRC_DIR"
++fi
++echo "  依赖构建完成"
++echo ""
++echo "=== Step 3: cmake 配置 fbthrift ==="
++rm -rf "$BUILD_DIR"; mkdir -p "$BUILD_DIR"; cd "$BUILD_DIR"
++cmake "$SRC_DIR" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER="$CXX" -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_FLAGS="-fprofile-instr-generate -fcoverage-mapping" -DCMAKE_EXE_LINKER_FLAGS="-fprofile-instr-generate -fcoverage-mapping" -DTHRIFT_ENABLE_ARM_SVE2=ON -Denable_tests=ON -Dfmt_DIR=/usr/local/fmt/lib/cmake/fmt -Dfolly_DIR=/usr/local/folly/lib/cmake/folly -Dfizz_DIR=/usr/local/fizz/lib/cmake/fizz -Dwangle_DIR=/usr/local/wangle/lib/cmake/wangle ${GMOCK_LIB:+-DLIBGMOCK_LIBRARY="$GMOCK_LIB"} ${GMOCK_MAIN_LIB:+-DLIBGMOCK_MAIN_LIBRARY="$GMOCK_MAIN_LIB"} ${GTEST_LIB:+-DLIBGTEST_LIBRARY="$GTEST_LIB"} ${GTEST_MAIN_LIB:+-DLIBGTEST_MAIN_LIBRARY="$GTEST_MAIN_LIB"} ${GMOCK_INCLUDE_DIR:+-DGMOCK_INCLUDE_DIR="$GMOCK_INCLUDE_DIR"} ${GTEST_INCLUDE_DIR:+-DGTEST_INCLUDE_DIR="$GTEST_INCLUDE_DIR"} 2>&1 | tee /tmp/cmake_output.log | tail -10
++if [ ! -f CMakeCache.txt ] || [ ! -f Makefile ]; then echo "ERROR: cmake 配置失败"; grep -i "error\|fail\|not found\|missing" /tmp/cmake_output.log | head -20; echo "RESULT: FAIL"; exit 1; fi
++echo ""
++echo "=== Step 4: 测试目标 ==="
++if [ -n "$TEST_TARGETS_ARG" ]; then IFS=',' read -ra TARGETS <<< "$TEST_TARGETS_ARG"; else
++  TARGETS=()
++  ALL_TARGETS=$(grep -oP '^[a-zA-Z0-9_.-]+:' Makefile 2>/dev/null | tr -d ':' | sort -u || true)
++  if [ -z "$ALL_TARGETS" ]; then ALL_TARGETS=$(ls CMakeFiles/ 2>/dev/null | grep '\.dir$' | sed 's/\.dir$//' || true); fi
++  if [ -z "$ALL_TARGETS" ]; then ALL_TARGETS=$(make help 2>/dev/null | grep -oP '^\.\.\.\K\S+' || true); fi
++  echo "  可用目标: $(echo "$ALL_TARGETS" | wc -w) 个"
++  TEST_FILES=$(git -C "$SRC_DIR" diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null | grep -iP '/test[s]?/.*\.(cpp|cc)$' || true)
++  if [ -n "$TEST_FILES" ]; then echo "  PR 新增测试文件:"; while IFS= read -r tf; do echo "    $tf"; done <<< "$TEST_FILES"; fi
++  MATCHED_FILES=""
++  if [ -n "$TEST_FILES" ]; then
++    while IFS= read -r tf; do
++      base=$(basename "$tf" .cpp); matched=false
++      for variant in "$base" "$(echo "$base" | sed 's/Test$//' | sed 's/\(.\)\([A-Z]\)/\1_\2/g' | tr 'A-Z' 'a-z')_test" "$(echo "$base" | sed 's/Test$//' | tr 'A-Z' 'a-z')_test" "$(echo "$base" | sed 's/Test$//')Test-t" "$(echo "$base" | sed 's/Test$//' | sed 's/\(.\)\([A-Z]\)/\1_\2/g' | tr 'A-Z' 'a-z')"; do
++        for t in $ALL_TARGETS; do
++          if [ "$t" = "$variant" ] || [ "$t" = "${variant}-t" ] || [ "$t" = "${variant}_t" ]; then TARGETS+=("$t"); echo "    $tf -> $t (精确匹配)"; matched=true; MATCHED_FILES="$MATCHED_FILES $tf"; break 2; fi
++        done
++      done
++      if [ "$matched" = false ]; then
++        no_test=$(echo "$base" | sed 's/Test$//' | sed 's/test$//'); keywords=$(echo "$no_test" | sed 's/\([A-Z]\)/ \1/g' | tr 'A-Z' 'a-z' | tr ' ' '\n' | grep -v '^$' | grep -v '^.$' | tr '\n' ' ')
++        for t in $ALL_TARGETS; do
++          t_lower=$(echo "$t" | tr 'A-Z' 'a-z')
++          if ! echo "$t_lower" | grep -q 'test'; then continue; fi
++          if [ ! -d "CMakeFiles/${t}.dir" ]; then continue; fi
++          match=true
++          for kw in $keywords; do if ! echo "$t_lower" | grep -q "$kw"; then match=false; break; fi; done
++          if [ "$match" = "true" ]; then TARGETS+=("$t"); echo "    $tf -> $t (模糊匹配)"; matched=true; MATCHED_FILES="$MATCHED_FILES $tf"; break; fi
++        done
++      fi
++      if [ "$matched" = false ]; then echo "    $tf -> 未找到匹配的测试目标"; fi
++    done <<< "$TEST_FILES"
++  fi
++  UNMATCHED=""
++  while IFS= read -r tf; do if ! echo "$MATCHED_FILES" | grep -q "$tf"; then UNMATCHED="$UNMATCHED$tf "; fi; done <<< "$TEST_FILES"
++  if [ -n "$UNMATCHED" ] || [ ${#TARGETS[@]} -eq 0 ]; then
++    echo "  有测试文件未匹配到，编译所有测试目标..."
++    for t in $ALL_TARGETS; do
++      t_lower=$(echo "$t" | tr 'A-Z' 'a-z')
++      if [ ! -d "CMakeFiles/${t}.dir" ]; then continue; fi
++      if echo "$t_lower" | grep -q 'test'; then
++        found_existing=false
++        for existing in "${TARGETS[@]}"; do [ "$existing" = "$t" ] && found_existing=true && break; done
++        [ "$found_existing" = false ] && TARGETS+=("$t")
++      fi
++    done
++  fi
++fi
++if [ ${#TARGETS[@]} -eq 0 ]; then echo "ERROR: 未找到测试目标"; echo "  增量文件: $INCREMENTAL_CPP"; echo "  请通过参数指定: bash run_coverage.sh <base> <threshold> <test_targets>"; echo "RESULT: FAIL"; exit 1; fi
++echo "  目标: ${TARGETS[*]}"
++echo ""
++echo "=== Step 5: 编译测试 ==="
++declare -a TEST_BINS
++for target in "${TARGETS[@]}"; do
++  echo "  编译 $target ..."
++  if ! make "$target" -j"$(nproc)" >/tmp/build_test.log 2>&1; then tail -5 /tmp/build_test.log; echo "ERROR: 编译 $target 失败"; echo "RESULT: FAIL"; exit 1; fi
++  TESTBIN=$(find . -name "$target" -type f -executable 2>/dev/null | head -1)
++  if [ -z "$TESTBIN" ]; then for path in "./bin/$target" "./$target" "$target" "./test/$target"; do if [ -x "$path" ]; then TESTBIN="$path"; break; fi; done; fi
++  if [ -z "$TESTBIN" ]; then echo "ERROR: 找不到 $target 二进制"; echo "RESULT: FAIL"; exit 1; fi
++  TEST_BINS+=("$TESTBIN"); echo "  $target -> $TESTBIN"
++done
++echo ""
++echo "=== Step 6: 运行测试 ==="
++rm -f coverage_*.profraw coverage.profdata
++for i in "${!TARGETS[@]}"; do
++  target="${TARGETS[$i]}"; testbin="${TEST_BINS[$i]}"
++  echo "  运行 $testbin ..."
++  if LLVM_PROFILE_FILE="coverage_${target}_%p.profraw" "$testbin" 2>&1; then echo "  $target: PASSED"; else echo "ERROR: $target 测试失败"; echo "RESULT: FAIL"; exit 1; fi
++done
++echo ""
++echo "=== Step 7: 合并覆盖率 ==="
++mapfile -t PROFRAW_ARRAY < <(ls coverage_*.profraw 2>/dev/null || true)
++if [ ${#PROFRAW_ARRAY[@]} -eq 0 ]; then echo "ERROR: 无 profraw 文件"; echo "RESULT: FAIL"; exit 1; fi
++echo "  profraw: ${#PROFRAW_ARRAY[@]} 个"
++$PROFDATA merge "${PROFRAW_ARRAY[@]}" -o coverage.profdata 2>&1 || { echo "ERROR: profdata 合并失败"; echo "RESULT: FAIL"; exit 1; }
++echo ""
++echo "=== Step 8: 增量覆盖率 ==="
++INCREMENTAL_NEWLINE=$(printf '%s\n' "${INCREMENTAL_FILES[@]}")
++ALL_BINS_STR=$(printf '%s\n' "${TEST_BINS[@]}")
++INCREMENTAL_RESULT=$(SRC_DIR="$SRC_DIR" BASE_SHA="$BASE_SHA" HEAD_SHA="$HEAD_SHA" COV="$COV" ALL_BINS="$ALL_BINS_STR" INCREMENTAL_CPP="$INCREMENTAL_NEWLINE" python3 << 'PYEOF'
++import json, subprocess, os, re, sys
++SRC_DIR = os.environ['SRC_DIR']; BASE_SHA = os.environ['BASE_SHA']; HEAD_SHA = os.environ['HEAD_SHA']; COV = os.environ['COV']
++ALL_BINS = [b for b in os.environ['ALL_BINS'].split('\n') if b]
++INCREMENTAL_CPP = [f for f in os.environ['INCREMENTAL_CPP'].split('\n') if f]
++def get_added_lines(src_dir, base, head):
++    result = subprocess.run(['git', '-C', src_dir, 'diff', base, head], capture_output=True, text=True)
++    added = {}; current_file = None; new_line = 0
++    for line in result.stdout.split('\n'):
++        if line.startswith('+++ b/'): current_file = line[6:]; added[current_file] = set()
++        elif line.startswith('@@'):
++            m = re.search(r'\+(\d+)', line)
++            if m: new_line = int(m.group(1))
++        elif line.startswith('+') and not line.startswith('+++') and current_file: added[current_file].add(new_line); new_line += 1
++        elif not line.startswith('-') and not line.startswith('\\'): new_line += 1
++    return added
++def get_coverage(cov_tool, testbins, profdata, srcfile):
++    line_cov = {}
++    for testbin in testbins:
++        result = subprocess.run([cov_tool, 'export', testbin, '-instr-profile=' + profdata, '-format=text', srcfile], capture_output=True, text=True)
++        if not result.stdout: continue
++        try: data = json.loads(result.stdout)
++        except: continue
++        files = data.get("data", [{}])[0].get("files", [])
++        file_segs = None
++        if isinstance(files, list):
++            for item in files:
++                if isinstance(item, dict): file_segs = item.get("segments", []); break
++        elif isinstance(files, dict):
++            for fname, fdata in files.items(): file_segs = fdata.get("segments", []); break
++        if file_segs is None: continue
++        for seg in file_segs:
++            if seg[3] == 1:
++                ln = seg[0]; cnt = seg[2]
++                if ln not in line_cov or cnt > line_cov[ln]: line_cov[ln] = cnt
++    return line_cov
++added_lines = get_added_lines(SRC_DIR, BASE_SHA, HEAD_SHA)
++total_covered = 0; total_exec = 0
++for f in INCREMENTAL_CPP:
++    if f not in added_lines or not added_lines[f]: continue
++    srcfile = os.path.join(SRC_DIR, f)
++    if not os.path.exists(srcfile): print("  %s: 文件不存在" % f); continue
++    line_cov = get_coverage(COV, ALL_BINS, 'coverage.profdata', srcfile)
++    if not line_cov: print("  %s: 无覆盖率数据" % f); continue
++    pr_exec = {ln: line_cov[ln] for ln in added_lines[f] if ln in line_cov}
++    covered = sum(1 for c in pr_exec.values() if c > 0); total = len(pr_exec)
++    if total > 0:
++        pct = covered * 100 / total; print("  %s: %d/%d (%.1f%%)" % (f, covered, total, pct))
++        total_covered += covered; total_exec += total
++        uncovered = {ln: c for ln, c in pr_exec.items() if c == 0}
++        if uncovered:
++            print("    未覆盖行 (%d):" % len(uncovered))
++            src_lines = []
++            try:
++                with open(srcfile) as sf: src_lines = sf.readlines()
++            except: pass
++            for ln in sorted(uncovered.keys()):
++                if src_lines and ln <= len(src_lines): print("      %s:%d: %s" % (f, ln, src_lines[ln-1].rstrip()))
++                else: print("      %s:%d" % (f, ln))
++        no_cov_data = sorted(added_lines[f] - set(line_cov.keys()))
++        if no_cov_data:
++            print("    新增但无覆盖率数据 (%d):" % len(no_cov_data))
++            src_lines = []
++            try:
++                with open(srcfile) as sf: src_lines = sf.readlines()
++            except: pass
++            for ln in no_cov_data:
++                if src_lines and ln <= len(src_lines): print("      %s:%d: %s" % (f, ln, src_lines[ln-1].rstrip()))
++                else: print("      %s:%d" % (f, ln))
++    else: print("  %s: 无可执行新增行" % f)
++if total_exec > 0:
++    final_pct = total_covered * 100 / total_exec; print("TOTAL:%d/%d/%.1f" % (total_covered, total_exec, final_pct))
++else: print("TOTAL:0/0/SKIP")
++PYEOF
++)
++echo ""
++TOTAL_LINE=$(echo "$INCREMENTAL_RESULT" | grep "^TOTAL:")
++if [ -z "$TOTAL_LINE" ]; then echo "ERROR: 无法计算覆盖率"; echo "RESULT: FAIL"; exit 1; fi
++TOTAL_COVERED=$(echo "$TOTAL_LINE" | cut -d: -f2 | cut -d/ -f1)
++TOTAL_EXEC=$(echo "$TOTAL_LINE" | cut -d: -f2 | cut -d/ -f2 | cut -d/ -f1)
++FINAL_PCT=$(echo "$TOTAL_LINE" | cut -d/ -f3)
++echo "============================================"
++echo "  覆盖率汇总（仅 PR 新增可执行行）"
++echo "============================================"
++echo "$INCREMENTAL_RESULT" | grep -v "^TOTAL:"
++echo ""
++echo "  总计: $TOTAL_COVERED/$TOTAL_EXEC = ${FINAL_PCT}%"
++echo "  阈值: ${MIN_COVERAGE}%"
++HTML_DIR="$BUILD_DIR/coverage_html"; rm -rf "$HTML_DIR"
++SRC_LIST=()
++for f in "${INCREMENTAL_FILES[@]}"; do [ -f "$SRC_DIR/$f" ] && SRC_LIST+=("$SRC_DIR/$f"); done
++for covbin in "${TEST_BINS[@]}"; do "$COV" show "$covbin" -instr-profile=coverage.profdata -format=html -output-dir="$HTML_DIR" "${SRC_LIST[@]}" 2>/dev/null && break; done
++echo "  HTML: $HTML_DIR/index.html"
++PASS=$(python3 -c "
++import sys
++final = float(sys.argv[1])
++threshold = float(sys.argv[2])
++print('PASS' if final >= threshold else 'FAIL')
++" "$FINAL_PCT" "$MIN_COVERAGE")
++echo ""
++echo "============================================"
++echo "  RESULT: $PASS"
++echo "  增量覆盖率 ${FINAL_PCT}% $PASS 阈值 ${MIN_COVERAGE}%"
++echo "============================================"
++[ "$PASS" = "PASS" ] && exit 0 || exit 1
+diff --git a/run_threadmanager_direct_func_checks.sh b/run_threadmanager_direct_func_checks.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..9fd72c8e5fe7a01af28a354e406962c3722ab76b
+--- /dev/null
++++ b/run_threadmanager_direct_func_checks.sh
+@@ -0,0 +1,378 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++usage() {
++  cat <<'EOF'
++Usage:
++  run_threadmanager_direct_func_checks.sh [ut|coverage|all]
++
++Modes:
++  ut        Build with Clang 16 and run the ThreadManager direct-func UTs.
++  coverage  Build with coverage instrumentation, run the UTs, and calculate
++            incremental line coverage for the optimization commit.
++  all       Run both steps. This is the default.
++
++Optional environment variables:
++  DIRECT_FUNC_COMMIT             Optimization commit, default: 0c5106f
++  MIN_INCREMENTAL_COVERAGE       Required percentage, default: 80
++  FBTHRIFT_UT_BUILD_DIR          Normal UT build directory
++  FBTHRIFT_COVERAGE_BUILD_DIR    Coverage build directory
++  FBTHRIFT_CLANG16_CXX           Normal compiler
++  FBTHRIFT_COVERAGE_CXX          Coverage compiler; must include profile runtime
++  FBTHRIFT_FOLLY_PREFIX          Installed Folly prefix
++  FBTHRIFT_FIZZ_PREFIX           Installed Fizz prefix
++  FBTHRIFT_WANGLE_PREFIX         Installed Wangle prefix
++  FBTHRIFT_INSTALL_PREFIX        Installed fbthrift prefix
++
++Examples:
++  ./run_threadmanager_direct_func_checks.sh ut
++  ./run_threadmanager_direct_func_checks.sh coverage
++  MIN_INCREMENTAL_COVERAGE=85 ./run_threadmanager_direct_func_checks.sh all
++EOF
++}
++
++mode="${1:-all}"
++case "${mode}" in
++  ut|coverage|all) ;;
++  -h|--help)
++    usage
++    exit 0
++    ;;
++  *)
++    usage >&2
++    exit 2
++    ;;
++esac
++
++script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++repo="$(git -C "${script_dir}" rev-parse --show-toplevel)"
++
++direct_func_commit="${DIRECT_FUNC_COMMIT:-0c5106f}"
++minimum_coverage="${MIN_INCREMENTAL_COVERAGE:-80}"
++relative_source=thrift/lib/cpp/concurrency/ThreadManager.cpp
++source_file="${repo}/${relative_source}"
++test_source="${repo}/thrift/lib/cpp/concurrency/test/ThreadManagerDirectFuncTest.cpp"
++test_target=thread_manager_direct_func-t
++test_filter='ThreadManagerDirectFuncTest'
++
++ut_build="${FBTHRIFT_UT_BUILD_DIR:-/tmp/fbthrift-threadmanager-direct-func-ut}"
++coverage_build="${FBTHRIFT_COVERAGE_BUILD_DIR:-/tmp/fbthrift-threadmanager-direct-func-coverage}"
++
++clang16_cxx="${FBTHRIFT_CLANG16_CXX:-/home/donghuan/clang-16/bin/clang++}"
++coverage_cxx="${FBTHRIFT_COVERAGE_CXX:-/usr/bin/clang++}"
++llvm_profdata="${LLVM_PROFDATA:-/usr/bin/llvm-profdata}"
++llvm_cov="${LLVM_COV:-/usr/bin/llvm-cov}"
++
++folly_prefix="${FBTHRIFT_FOLLY_PREFIX:-/home/donghuan/ins/folly}"
++fizz_prefix="${FBTHRIFT_FIZZ_PREFIX:-/home/donghuan/ins/fizz}"
++wangle_prefix="${FBTHRIFT_WANGLE_PREFIX:-/home/donghuan/ins/wangle}"
++fbthrift_prefix="${FBTHRIFT_INSTALL_PREFIX:-/home/donghuan/ins/fbthrift}"
++
++runtime_library_path="${folly_prefix}/lib:${fizz_prefix}/lib:${wangle_prefix}/lib:${fbthrift_prefix}/lib"
++if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
++  runtime_library_path="${runtime_library_path}:${LD_LIBRARY_PATH}"
++fi
++
++require_executable() {
++  if [[ ! -x "$1" ]]; then
++    echo "Required executable not found: $1" >&2
++    exit 1
++  fi
++}
++
++require_executable "${clang16_cxx}"
++require_executable "${coverage_cxx}"
++require_executable "${llvm_profdata}"
++require_executable "${llvm_cov}"
++
++git -C "${repo}" rev-parse --verify "${direct_func_commit}^{commit}" >/dev/null
++
++common_cmake_args=(
++  -DCMAKE_BUILD_TYPE=Debug
++  "-DCMAKE_PREFIX_PATH=${folly_prefix};${fizz_prefix};${wangle_prefix}"
++  "-Dfizz_DIR=${fizz_prefix}/lib/cmake/fizz"
++  "-Dwangle_DIR=${wangle_prefix}/lib/cmake/wangle"
++  -Denable_tests=ON
++  -Dlib_only=ON
++  -Dthriftpy=OFF
++  -Dthriftpy3=OFF
++  "-DTHRIFT_COMPILER_INCLUDE=${fbthrift_prefix}/include"
++)
++
++run_ut() {
++  echo "== Configure normal UT build =="
++  cmake -S "${repo}" -B "${ut_build}" \
++    "${common_cmake_args[@]}" \
++    "-DCMAKE_CXX_COMPILER=${clang16_cxx}"
++
++  echo "== Build ${test_target} =="
++  cmake --build "${ut_build}" --target "${test_target}" -j"$(nproc)"
++
++  echo "== Run ThreadManager direct-func UTs =="
++  LD_LIBRARY_PATH="${runtime_library_path}" \
++    ctest --test-dir "${ut_build}" \
++      --output-on-failure \
++      -R "${test_filter}"
++}
++
++calculate_incremental_coverage() {
++  local binary="$1"
++  local profile="$2"
++  local artifacts="$3"
++
++  git -C "${repo}" diff --unified=0 \
++    "${direct_func_commit}^" "${direct_func_commit}" -- \
++    "${relative_source}" |
++    awk '
++      /^@@/ {
++        if (match($0, /\+([0-9]+)(,([0-9]+))?/, range)) {
++          start = range[1]
++          count = range[3] == "" ? 1 : range[3]
++          for (offset = 0; offset < count; ++offset) {
++            print start + offset
++          }
++        }
++      }
++    ' > "${artifacts}/added-lines.txt"
++
++  "${llvm_cov}" show "${binary}" \
++    -instr-profile="${profile}" \
++    -show-line-counts-or-regions \
++    -show-expansions=false \
++    -show-instantiations=false \
++    "${source_file}" |
++    awk -F '|' '
++      NF >= 3 {
++        line = $1
++        count = $2
++        gsub(/[[:space:]]/, "", line)
++        gsub(/[[:space:],]/, "", count)
++        if (line ~ /^[0-9]+$/ && count ~ /^[0-9]+$/) {
++          print line, count
++        }
++      }
++    ' > "${artifacts}/line-counts.txt"
++
++  awk '
++    FNR == NR {
++      added[$1] = 1
++      changed++
++      next
++    }
++    $1 in added {
++      executable++
++      if ($2 > 0) {
++        covered++
++      } else {
++        missed++
++        missed_lines = missed_lines (missed_lines == "" ? "" : ",") $1
++      }
++    }
++    END {
++      printf "DIRECT_FUNC_COMMIT=%s\n", commit
++      printf "CHANGED_LINES=%d\n", changed
++      printf "EXECUTABLE_CHANGED_LINES=%d\n", executable
++      printf "COVERED_CHANGED_LINES=%d\n", covered
++      printf "MISSED_CHANGED_LINES=%d\n", missed
++      printf "INCREMENTAL_LINE_COVERAGE=%.2f%%\n", \
++        executable == 0 ? 100 : covered * 100 / executable
++      printf "MISSED_EXECUTABLE_LINES=%s\n", missed_lines
++    }
++  ' commit="${direct_func_commit}" \
++    "${artifacts}/added-lines.txt" \
++    "${artifacts}/line-counts.txt" |
++    tee "${artifacts}/incremental-coverage.txt"
++
++  awk '
++    FILENAME == ARGV[1] {
++      added[$1] = 1
++      next
++    }
++    FILENAME == ARGV[2] {
++      if ($1 in added) {
++        status[$1] = $2 > 0 ? "COVERED" : "MISSED"
++        count[$1] = $2
++      }
++      next
++    }
++    FILENAME == ARGV[3] && FNR in status {
++      printf "%-7s line=%-5d count=%-5d %s\n", \
++        status[FNR], FNR, count[FNR], $0
++    }
++  ' "${artifacts}/added-lines.txt" \
++    "${artifacts}/line-counts.txt" \
++    "${source_file}" > "${artifacts}/incremental-lines.txt"
++
++  "${llvm_cov}" report "${binary}" \
++    -instr-profile="${profile}" \
++    "${source_file}" "${test_source}" \
++    > "${artifacts}/full-report.txt"
++
++  "${llvm_cov}" show "${binary}" \
++    -instr-profile="${profile}" \
++    -format=html \
++    -output-dir="${artifacts}/html/full" \
++    "${source_file}" "${test_source}" >/dev/null
++
++  local changed_lines
++  local executable_changed_lines
++  local covered_changed_lines
++  local missed_changed_lines
++  local actual_coverage
++  changed_lines="$(
++    awk -F= '$1 == "CHANGED_LINES" { print $2 }' \
++      "${artifacts}/incremental-coverage.txt"
++  )"
++  executable_changed_lines="$(
++    awk -F= '$1 == "EXECUTABLE_CHANGED_LINES" { print $2 }' \
++      "${artifacts}/incremental-coverage.txt"
++  )"
++  covered_changed_lines="$(
++    awk -F= '$1 == "COVERED_CHANGED_LINES" { print $2 }' \
++      "${artifacts}/incremental-coverage.txt"
++  )"
++  missed_changed_lines="$(
++    awk -F= '$1 == "MISSED_CHANGED_LINES" { print $2 }' \
++      "${artifacts}/incremental-coverage.txt"
++  )"
++  actual_coverage="$(
++    awk -F= '
++      $1 == "INCREMENTAL_LINE_COVERAGE" {
++        gsub(/%/, "", $2)
++        print $2
++      }
++    ' "${artifacts}/incremental-coverage.txt"
++  )"
++
++  mkdir -p "${artifacts}/html"
++  awk \
++    -v commit="${direct_func_commit}" \
++    -v actual="${actual_coverage}" \
++    -v required="${minimum_coverage}" \
++    -v changed="${changed_lines}" \
++    -v executable="${executable_changed_lines}" \
++    -v covered="${covered_changed_lines}" \
++    -v missed="${missed_changed_lines}" '
++    function escape_html(text, output, position, character) {
++      output = ""
++      for (position = 1; position <= length(text); ++position) {
++        character = substr(text, position, 1)
++        if (character == "&") {
++          output = output "&amp;"
++        } else if (character == "<") {
++          output = output "&lt;"
++        } else if (character == ">") {
++          output = output "&gt;"
++        } else {
++          output = output character
++        }
++      }
++      return output
++    }
++    BEGIN {
++      passed = actual + 0 >= required + 0
++      result = passed ? "PASS" : "FAIL"
++      result_class = passed ? "pass" : "fail"
++      print "<!doctype html>"
++      print "<html><head><meta charset=\"utf-8\">"
++      print "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
++      print "<title>ThreadManager Incremental Coverage</title>"
++      print "<style>"
++      print "body{font-family:Arial,sans-serif;margin:32px;color:#172033;background:#f5f7fb}"
++      print "h1{margin-bottom:6px}.subtitle{color:#65718a;margin-top:0}"
++      print ".cards{display:flex;gap:16px;flex-wrap:wrap;margin:24px 0}"
++      print ".card{background:white;border-radius:10px;padding:18px 22px;min-width:170px;box-shadow:0 2px 10px #dfe5ef}"
++      print ".value{font-size:28px;font-weight:700}.label{color:#65718a;margin-top:4px}"
++      print ".pass,.covered{color:#16833b}.fail,.missed{color:#c23131}"
++      print "table{width:100%;border-collapse:collapse;background:white;box-shadow:0 2px 10px #dfe5ef}"
++      print "th,td{text-align:left;padding:9px 12px;border-bottom:1px solid #e7ebf2}"
++      print "th{background:#edf1f7}code{white-space:pre-wrap}"
++      print ".note{background:#fff8df;border-left:4px solid #d7a500;padding:12px 16px;margin:20px 0}"
++      print "</style></head><body>"
++      print "<h1>ThreadManager Incremental Coverage</h1>"
++      printf "<p class=\"subtitle\">Executable lines added by optimization commit %s only</p>\n", commit
++      print "<div class=\"cards\">"
++      printf "<div class=\"card\"><div class=\"value\">%.2f%%</div><div class=\"label\">Incremental line coverage</div></div>\n", actual
++      printf "<div class=\"card\"><div class=\"value\">%s/%s</div><div class=\"label\">Covered executable lines</div></div>\n", covered, executable
++      printf "<div class=\"card\"><div class=\"value %s\">%s</div><div class=\"label\">Gate &gt;= %.2f%%</div></div>\n", result_class, result, required
++      print "</div>"
++      printf "<div class=\"note\">This is a diff coverage report: %s changed lines, %s executable, %s covered and %s missed. The <a href=\"full/index.html\">full-file LLVM report</a> includes unrelated legacy ThreadManager code and is not the 80%% gate.</div>\n", changed, executable, covered, missed
++      print "<table><thead><tr><th>Status</th><th>Line</th><th>Count</th><th>Source</th></tr></thead><tbody>"
++    }
++    {
++      status = $1
++      line = $2
++      count = $3
++      sub(/^line=/, "", line)
++      sub(/^count=/, "", count)
++      source = $0
++      sub(/^[^[:space:]]+[[:space:]]+line=[^[:space:]]+[[:space:]]+count=[^[:space:]]+[[:space:]]*/, "", source)
++      css_class = status == "COVERED" ? "covered" : "missed"
++      printf "<tr><td class=\"%s\">%s</td><td>%s</td><td>%s</td><td><code>%s</code></td></tr>\n", \
++        css_class, status, line, count, escape_html(source)
++    }
++    END {
++      print "</tbody></table></body></html>"
++    }
++  ' "${artifacts}/incremental-lines.txt" \
++    > "${artifacts}/html/index.html"
++
++  if ! awk -v actual="${actual_coverage}" -v required="${minimum_coverage}" \
++    'BEGIN { exit !(actual + 0 >= required + 0) }'; then
++    echo "Incremental coverage ${actual_coverage}% is below ${minimum_coverage}%" >&2
++    return 1
++  fi
++
++  echo "Incremental coverage gate passed: ${actual_coverage}% >= ${minimum_coverage}%"
++}
++
++run_coverage() {
++  echo "== Configure coverage build =="
++  cmake -S "${repo}" -B "${coverage_build}" \
++    "${common_cmake_args[@]}" \
++    "-DCMAKE_CXX_COMPILER=${coverage_cxx}" \
++    '-DCMAKE_CXX_FLAGS=-fprofile-instr-generate -fcoverage-mapping' \
++    '-DCMAKE_EXE_LINKER_FLAGS=-fprofile-instr-generate'
++
++  echo "== Build instrumented ${test_target} =="
++  cmake --build "${coverage_build}" --target "${test_target}" -j"$(nproc)"
++
++  local binary="${coverage_build}/bin/${test_target}"
++  local artifacts
++  artifacts="$(mktemp -d "${coverage_build}/coverage-artifacts.XXXXXX")"
++
++  echo "== Run instrumented UTs =="
++  LLVM_PROFILE_FILE="${artifacts}/direct-func-%p.profraw" \
++    LD_LIBRARY_PATH="${runtime_library_path}" \
++    "${binary}" --gtest_color=no
++
++  "${llvm_profdata}" merge -sparse \
++    "${artifacts}"/direct-func-*.profraw \
++    -o "${artifacts}/direct-func.profdata"
++
++  echo "== Calculate incremental line coverage =="
++  calculate_incremental_coverage \
++    "${binary}" \
++    "${artifacts}/direct-func.profdata" \
++    "${artifacts}"
++
++  echo "Coverage artifacts: ${artifacts}"
++  echo "Summary:            ${artifacts}/incremental-coverage.txt"
++  echo "Changed-line detail: ${artifacts}/incremental-lines.txt"
++  echo "Full report:         ${artifacts}/full-report.txt"
++  echo "Incremental HTML:     ${artifacts}/html/index.html"
++  echo "Full-file LLVM HTML:  ${artifacts}/html/full/index.html"
++}
++
++case "${mode}" in
++  ut)
++    run_ut
++    ;;
++  coverage)
++    run_coverage
++    ;;
++  all)
++    run_ut
++    run_coverage
++    ;;
++esac
+diff --git a/thrift/compiler/generate/json.cc b/thrift/compiler/generate/json.cc
+index c4d87a3332d79a8d9f9efb501bc8ded589ed2c0b..182a27417fb40049c8db72c542f839c31f97e1ee 100644
+--- a/thrift/compiler/generate/json.cc
++++ b/thrift/compiler/generate/json.cc
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include <thrift/compiler/generate/json.h>
++#include <cstdint>
+ 
+ #include <ostream>
+ #include <sstream>
+diff --git a/thrift/lib/cpp/CMakeLists.txt b/thrift/lib/cpp/CMakeLists.txt
+index 678ce38b41b0454261b2e4c31ad7c9cfb10c883d..cf38acc44b863d1fe0ea0bda627175a854342fff 100644
+--- a/thrift/lib/cpp/CMakeLists.txt
++++ b/thrift/lib/cpp/CMakeLists.txt
+@@ -48,6 +48,14 @@ target_link_libraries(
+     ${GLOG_LIBRARIES}
+ )
+ 
++if(enable_tests)
++  thrift_gtest(
++    thread_manager_direct_func
++    concurrency/test/ThreadManagerDirectFuncTest.cpp
++    concurrency
++  )
++endif()
++
+ add_library(
+   transport
+ 
+diff --git a/thrift/lib/cpp/concurrency/ThreadManager.cpp b/thrift/lib/cpp/concurrency/ThreadManager.cpp
+index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179297ceca5 100644
+--- a/thrift/lib/cpp/concurrency/ThreadManager.cpp
++++ b/thrift/lib/cpp/concurrency/ThreadManager.cpp
+@@ -24,6 +24,7 @@
+ #include <queue>
+ #include <set>
+ #include <string>
++#include <variant>
+ 
+ #include <glog/logging.h>
+ 
+@@ -50,6 +51,11 @@
+ FOLLY_GFLAGS_DEFINE_bool(
+     codel_enabled, false, "Enable codel queue timeout algorithm");
+ 
++FOLLY_GFLAGS_DEFINE_bool(
++    thrift_thread_manager_direct_func_enabled,
++    true,
++    "Store folly::Func directly in ThreadManager tasks");
++
+ namespace apache {
+ namespace thrift {
+ namespace concurrency {
+@@ -172,20 +178,56 @@ class ThreadManager::Task {
+         context_(folly::RequestContext::saveContext()),
+         qpriority_(qpriority) {}
+ 
++  Task(
++      folly::Func func,
++      const std::chrono::milliseconds& expiration,
++      size_t qpriority)
++      : runnable_(std::move(func)),
++        queueBeginTime_(std::chrono::steady_clock::now()),
++        expireTime_(
++            expiration > std::chrono::milliseconds::zero()
++                ? queueBeginTime_ + expiration
++                : std::chrono::steady_clock::time_point()),
++        context_(folly::RequestContext::saveContext()),
++        qpriority_(qpriority) {}
++
+   ~Task() {}
+ 
+   void run() {
+     folly::RequestContextScopeGuard rctx(context_);
+-    invokeCatchingExns(
+-        "ThreadManager: func", [&] { std::exchange(runnable_, {})->run(); });
++    invokeCatchingExns("ThreadManager: func", [&] {
++      if (auto* func = std::get_if<folly::Func>(&runnable_)) {
++        std::exchange(*func, folly::Func{})();
++      } else {
++        std::exchange(
++            std::get<std::shared_ptr<Runnable>>(runnable_),
++            std::shared_ptr<Runnable>{})
++            ->run();
++      }
++    });
+   }
+ 
+   void skip() {
+     folly::RequestContextScopeGuard rctx(context_);
+-    std::exchange(runnable_, {});
++    if (auto* func = std::get_if<folly::Func>(&runnable_)) {
++      std::exchange(*func, folly::Func{});
++    } else {
++      std::exchange(
++          std::get<std::shared_ptr<Runnable>>(runnable_),
++          std::shared_ptr<Runnable>{});
++    }
+   }
+ 
+-  const std::shared_ptr<Runnable>& getRunnable() const { return runnable_; }
++  const std::shared_ptr<Runnable>& getRunnable() const {
++    // Preserve the legacy callback/removal API without paying for a
++    // FunctionRunner allocation on the normal execution path.
++    if (auto* func = std::get_if<folly::Func>(&runnable_)) {
++      auto runnable = FunctionRunner::create(std::move(*func));
++      runnable_.template emplace<std::shared_ptr<Runnable>>(
++          std::move(runnable));
++    }
++    return std::get<std::shared_ptr<Runnable>>(runnable_);
++  }
+ 
+   std::chrono::steady_clock::time_point getExpireTime() const {
+     return expireTime_;
+@@ -208,7 +250,7 @@ class ThreadManager::Task {
+   size_t queuePriority() const { return qpriority_; }
+ 
+  private:
+-  std::shared_ptr<Runnable> runnable_;
++  mutable std::variant<std::shared_ptr<Runnable>, folly::Func> runnable_;
+   std::chrono::steady_clock::time_point queueBeginTime_;
+   std::chrono::steady_clock::time_point expireTime_;
+   std::shared_ptr<folly::RequestContext> context_;
+@@ -310,7 +352,11 @@ class ThreadManager::Impl : public ThreadManager,
+    * Implements folly::Executor::add()
+    */
+   void add(folly::Func f) override {
+-    add(FunctionRunner::create(std::move(f)));
++    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
++      addFunc(0, std::move(f), 0, Source::INTERNAL);
++    } else {
++      add(FunctionRunner::create(std::move(f)));
++    }
+   }
+ 
+   void remove(std::shared_ptr<Runnable> task) override;
+@@ -350,6 +396,12 @@ class ThreadManager::Impl : public ThreadManager,
+ 
+   std::chrono::nanoseconds getUsedCpuTime() const override;
+ 
++  void addFunc(
++      size_t priority,
++      folly::Func func,
++      int64_t expiration,
++      Source source) noexcept;
++
+  protected:
+   void add(
+       size_t priority,
+@@ -455,7 +507,11 @@ class SimpleThreadManagerImpl : public ThreadManager::Impl {
+ 
+   void addWithPriorityAndSource(folly::Func f, PRIORITY pri, Source source) {
+     DCHECK(pri == PRIORITY::NORMAL);
+-    add(FunctionRunner::create(std::move(f)), 0, 0, source);
++    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
++      addFunc(0, std::move(f), 0, source);
++    } else {
++      add(FunctionRunner::create(std::move(f)), 0, 0, source);
++    }
+   }
+ 
+  private:
+@@ -884,6 +940,38 @@ void ThreadManager::Impl::add(
+   }
+ }
+ 
++void ThreadManager::Impl::addFunc(
++    size_t priority,
++    folly::Func func,
++    int64_t expiration,
++    ThreadManager::Source source) noexcept {
++  CHECK(
++      state_ != ThreadManager::UNINITIALIZED &&
++      state_ != ThreadManager::STARTING)
++      << "ThreadManager::Impl::addFunc ThreadManager not started";
++
++  if (state_ != ThreadManager::STARTED) {
++    LOG(WARNING) << "abort addFunc() that got called after join() or stop()";
++    return;
++  }
++
++  priority = N_SOURCES * priority + static_cast<int>(source);
++  const auto qpriority = std::min(tasks_.priorities() - 1, priority);
++  auto task = std::make_unique<Task>(
++      std::move(func), std::chrono::milliseconds{expiration}, qpriority);
++  if (queueObservers_) {
++    task->queueObserverPayload() =
++        queueObservers_->at(qpriority)->onEnqueued(task->getContext().get());
++  }
++  tasks_.at_priority(qpriority).enqueue(std::move(task));
++
++  ++totalTaskCount_;
++
++  if (idleCount_ > 0) {
++    waitSem_.post();
++  }
++}
++
+ void ThreadManager::Impl::remove(std::shared_ptr<Runnable> /*task*/) {
+   std::unique_lock<std::mutex> l(mutex_);
+   if (state_ != ThreadManager::STARTED) {
+@@ -946,7 +1034,6 @@ std::unique_ptr<ThreadManager::Task> ThreadManager::Impl::waitOnTask() {
+   }
+ 
+   // Otherwise, no tasks on the horizon, so go sleep
+-  std::unique_lock<std::mutex> l(mutex_);
+   if (shouldStop()) {
+     // check again because it might have changed by the time we got the mutex
+     return nullptr;
+@@ -954,11 +1041,9 @@ std::unique_ptr<ThreadManager::Task> ThreadManager::Impl::waitOnTask() {
+ 
+   ++idleCount_;
+   --totalTaskCount_;
+-  l.unlock();
+   while (!tasks_.try_dequeue(task)) {
+     waitSem_.wait();
+     if (shouldStop()) {
+-      std::unique_lock<std::mutex> l2(mutex_);
+       --idleCount_;
+       ++totalTaskCount_;
+       return nullptr;
+@@ -1191,7 +1276,11 @@ class PriorityThreadManager::PriorityImpl
+   }
+ 
+   void addWithPriorityAndSource(folly::Func f, PRIORITY pri, Source source) {
+-    managers_[pri]->add(FunctionRunner::create(std::move(f)), 0, 0, source);
++    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
++      managers_[pri]->addFunc(0, std::move(f), 0, source);
++    } else {
++      managers_[pri]->add(FunctionRunner::create(std::move(f)), 0, 0, source);
++    }
+   }
+ 
+   KeepAlive<> getKeepAlive(ExecutionScope es, Source source) const override {
+@@ -1204,7 +1293,12 @@ class PriorityThreadManager::PriorityImpl
+    * Implements folly::Executor::add()
+    */
+   void add(folly::Func f) override {
+-    add(FunctionRunner::create(std::move(f)));
++    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
++      managers_[PRIORITY::NORMAL]->addFunc(
++          0, std::move(f), 0, Source::INTERNAL);
++    } else {
++      add(FunctionRunner::create(std::move(f)));
++    }
+   }
+ 
+   /**
+@@ -1218,7 +1312,11 @@ class PriorityThreadManager::PriorityImpl
+    */
+   void addWithPriority(folly::Func f, int8_t priority) override {
+     auto prio = translatePriority(priority);
+-    add(prio, FunctionRunner::create(std::move(f)));
++    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
++      managers_[prio]->addFunc(0, std::move(f), 0, Source::INTERNAL);
++    } else {
++      add(prio, FunctionRunner::create(std::move(f)));
++    }
+   }
+ 
+   template <typename T>
+@@ -1334,7 +1432,7 @@ class PriorityThreadManager::PriorityImpl
+         pri, source, this);
+   }
+ 
+-  std::unique_ptr<ThreadManager> managers_[N_PRIORITIES];
++  std::unique_ptr<ThreadManager::Impl> managers_[N_PRIORITIES];
+   size_t counts_[N_PRIORITIES];
+   mutable std::mutex mutex_;
+   std::vector<std::unique_ptr<Executor, Deleter>> executors_;
+@@ -1380,12 +1478,20 @@ class PriorityQueueThreadManager : public ThreadManager::Impl {
+     // and we want to prioritize inflight requests over admitting new request.
+     // arguably, we may even want a priority above the max we ever allow for
+     // initial queueing
+-    ThreadManager::Impl::add(
+-        PRIORITY::HIGH_IMPORTANT,
+-        std::make_shared<FunctionRunner>(std::move(f)),
+-        0,
+-        0,
+-        apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
++    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
++      ThreadManager::Impl::addFunc(
++          PRIORITY::HIGH_IMPORTANT,
++          std::move(f),
++          0,
++          apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
++    } else {
++      ThreadManager::Impl::add(
++          PRIORITY::HIGH_IMPORTANT,
++          std::make_shared<FunctionRunner>(std::move(f)),
++          0,
++          0,
++          apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
++    }
+   }
+ 
+   /**
+@@ -1393,12 +1499,20 @@ class PriorityQueueThreadManager : public ThreadManager::Impl {
+    */
+   void addWithPriority(folly::Func f, int8_t priority) override {
+     auto prio = translatePriority(priority);
+-    ThreadManager::Impl::add(
+-        prio,
+-        std::make_shared<FunctionRunner>(std::move(f)),
+-        0,
+-        0,
+-        apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
++    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
++      ThreadManager::Impl::addFunc(
++          prio,
++          std::move(f),
++          0,
++          apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
++    } else {
++      ThreadManager::Impl::add(
++          prio,
++          std::make_shared<FunctionRunner>(std::move(f)),
++          0,
++          0,
++          apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
++    }
+   }
+ 
+   uint8_t getNumPriorities() const override { return N_PRIORITIES; }
+@@ -1409,7 +1523,11 @@ class PriorityQueueThreadManager : public ThreadManager::Impl {
+   }
+ 
+   void addWithPriorityAndSource(folly::Func f, PRIORITY pri, Source source) {
+-    add(pri, std::make_shared<FunctionRunner>(std::move(f)), 0, 0, source);
++    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
++      addFunc(pri, std::move(f), 0, source);
++    } else {
++      add(pri, std::make_shared<FunctionRunner>(std::move(f)), 0, 0, source);
++    }
+   }
+ 
+   KeepAlive<> getKeepAlive(ExecutionScope es, Source source) const override {
+diff --git a/thrift/lib/cpp/concurrency/test/ThreadManagerDirectFuncTest.cpp b/thrift/lib/cpp/concurrency/test/ThreadManagerDirectFuncTest.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..b448b877102ceb412d498b83e8d14d0d4c096a97
+--- /dev/null
++++ b/thrift/lib/cpp/concurrency/test/ThreadManagerDirectFuncTest.cpp
+@@ -0,0 +1,210 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <array>
++#include <atomic>
++#include <chrono>
++#include <functional>
++#include <memory>
++
++#include <folly/portability/GFlags.h>
++#include <folly/portability/GTest.h>
++#include <folly/synchronization/Baton.h>
++#include <thrift/lib/cpp/concurrency/FunctionRunner.h>
++#include <thrift/lib/cpp/concurrency/ThreadManager.h>
++
++FOLLY_GFLAGS_DECLARE_bool(thrift_thread_manager_direct_func_enabled);
++
++using apache::thrift::concurrency::FunctionRunner;
++using apache::thrift::concurrency::PriorityThreadManager;
++using apache::thrift::concurrency::Runnable;
++using apache::thrift::concurrency::ThreadManager;
++using namespace std::chrono_literals;
++
++namespace {
++
++using ManagerFactory = std::function<std::shared_ptr<ThreadManager>()>;
++
++class ThreadManagerDirectFuncTest : public testing::Test {
++ private:
++  gflags::FlagSaver flagSaver_;
++};
++
++std::array<ManagerFactory, 3> managerFactories() {
++  return {
++      [] { return ThreadManager::newSimpleThreadManager(1); },
++      [] { return ThreadManager::newPriorityQueueThreadManager(1); },
++      [] {
++        return PriorityThreadManager::newPriorityThreadManager(
++            {{1, 1, 1, 1, 1}});
++      }};
++}
++
++TEST_F(
++    ThreadManagerDirectFuncTest,
++    DirectPathExecutesMoveOnlyFuncAcrossManagerImplementations) {
++  FLAGS_thrift_thread_manager_direct_func_enabled = true;
++
++  for (const auto& makeManager : managerFactories()) {
++    auto manager = makeManager();
++    manager->start();
++
++    std::atomic<int> observed{0};
++    folly::Baton<> done;
++    auto value = std::make_unique<int>(42);
++    manager->add([value = std::move(value), &observed, &done]() mutable {
++      observed.store(*value, std::memory_order_relaxed);
++      value.reset();
++      done.post();
++    });
++
++    const bool completed = done.try_wait_for(5s);
++    manager->join();
++
++    EXPECT_TRUE(completed);
++    EXPECT_EQ(observed.load(std::memory_order_relaxed), 42);
++  }
++}
++
++TEST_F(ThreadManagerDirectFuncTest, DisabledFlagUsesLegacyExecutionPath) {
++  FLAGS_thrift_thread_manager_direct_func_enabled = false;
++
++  auto manager = ThreadManager::newSimpleThreadManager(1);
++  manager->start();
++
++  std::atomic<int> calls{0};
++  folly::Baton<> done;
++  manager->add([&] {
++    calls.fetch_add(1, std::memory_order_relaxed);
++    done.post();
++  });
++
++  const bool completed = done.try_wait_for(5s);
++  manager->join();
++
++  EXPECT_TRUE(completed);
++  EXPECT_EQ(calls.load(std::memory_order_relaxed), 1);
++}
++
++TEST_F(
++    ThreadManagerDirectFuncTest,
++    RemoveNextPendingLazilyMaterializesFunctionRunner) {
++  FLAGS_thrift_thread_manager_direct_func_enabled = true;
++
++  auto manager = ThreadManager::newSimpleThreadManager(1);
++  manager->start();
++
++  folly::Baton<> blockerStarted;
++  folly::Baton<> unblockWorker;
++  manager->add([&] {
++    blockerStarted.post();
++    unblockWorker.wait();
++  });
++
++  if (!blockerStarted.try_wait_for(5s)) {
++    unblockWorker.post();
++    manager->join();
++    FAIL() << "worker did not start the blocking task";
++  }
++
++  std::atomic<int> calls{0};
++  manager->add([&] { calls.fetch_add(1, std::memory_order_relaxed); });
++
++  std::shared_ptr<Runnable> removed = manager->removeNextPending();
++  unblockWorker.post();
++  manager->join();
++
++  ASSERT_NE(removed, nullptr);
++  EXPECT_NE(dynamic_cast<FunctionRunner*>(removed.get()), nullptr);
++  EXPECT_EQ(calls.load(std::memory_order_relaxed), 0);
++
++  removed->run();
++  EXPECT_EQ(calls.load(std::memory_order_relaxed), 1);
++}
++
++TEST_F(ThreadManagerDirectFuncTest, PriorityApisCoverDirectAndFallbackRoutes) {
++  auto priorityManager =
++      PriorityThreadManager::newPriorityThreadManager({{1, 1, 1, 1, 1}});
++  priorityManager->start();
++
++  folly::Baton<> priorityLegacyAdd;
++  folly::Baton<> priorityDirectAddWithPriority;
++  folly::Baton<> priorityLegacyAddWithPriority;
++
++  FLAGS_thrift_thread_manager_direct_func_enabled = false;
++  priorityManager->add([&] { priorityLegacyAdd.post(); });
++  FLAGS_thrift_thread_manager_direct_func_enabled = true;
++  priorityManager->addWithPriority(
++      [&] { priorityDirectAddWithPriority.post(); }, 1);
++  FLAGS_thrift_thread_manager_direct_func_enabled = false;
++  priorityManager->addWithPriority(
++      [&] { priorityLegacyAddWithPriority.post(); }, -1);
++
++  EXPECT_TRUE(priorityLegacyAdd.try_wait_for(5s));
++  EXPECT_TRUE(priorityDirectAddWithPriority.try_wait_for(5s));
++  EXPECT_TRUE(priorityLegacyAddWithPriority.try_wait_for(5s));
++  priorityManager->join();
++
++  auto priorityQueueManager = ThreadManager::newPriorityQueueThreadManager(1);
++  priorityQueueManager->start();
++
++  folly::Baton<> priorityQueueLegacyAdd;
++  folly::Baton<> priorityQueueDirectAddWithPriority;
++  folly::Baton<> priorityQueueLegacyAddWithPriority;
++
++  FLAGS_thrift_thread_manager_direct_func_enabled = false;
++  priorityQueueManager->add([&] { priorityQueueLegacyAdd.post(); });
++  FLAGS_thrift_thread_manager_direct_func_enabled = true;
++  priorityQueueManager->addWithPriority(
++      [&] { priorityQueueDirectAddWithPriority.post(); }, 1);
++  FLAGS_thrift_thread_manager_direct_func_enabled = false;
++  priorityQueueManager->addWithPriority(
++      [&] { priorityQueueLegacyAddWithPriority.post(); }, -1);
++
++  EXPECT_TRUE(priorityQueueLegacyAdd.try_wait_for(5s));
++  EXPECT_TRUE(priorityQueueDirectAddWithPriority.try_wait_for(5s));
++  EXPECT_TRUE(priorityQueueLegacyAddWithPriority.try_wait_for(5s));
++  priorityQueueManager->join();
++}
++
++TEST_F(
++    ThreadManagerDirectFuncTest,
++    KeepAliveSourceRoutesCoverDirectAndFallbackPaths) {
++  for (const auto& makeManager : managerFactories()) {
++    auto manager = makeManager();
++    manager->start();
++
++    folly::Baton<> directDone;
++    folly::Baton<> fallbackDone;
++    {
++      auto executor = manager->getKeepAlive(
++          ThreadManager::ExecutionScope(
++              apache::thrift::concurrency::PRIORITY::NORMAL),
++          ThreadManager::Source::UPSTREAM);
++
++      FLAGS_thrift_thread_manager_direct_func_enabled = true;
++      executor->add([&] { directDone.post(); });
++      FLAGS_thrift_thread_manager_direct_func_enabled = false;
++      executor->add([&] { fallbackDone.post(); });
++    }
++
++    EXPECT_TRUE(directDone.try_wait_for(5s));
++    EXPECT_TRUE(fallbackDone.try_wait_for(5s));
++    manager->join();
++  }
++}
++
++} // namespace
+diff --git a/thrift/lib/cpp/transport/THeader.cpp b/thrift/lib/cpp/transport/THeader.cpp
+index 792e9f7c8c016a06034752b8cb43d352d0798925..0234fb2acd929a54b46e6dbe55a739720117c29c 100644
+--- a/thrift/lib/cpp/transport/THeader.cpp
++++ b/thrift/lib/cpp/transport/THeader.cpp
+@@ -16,6 +16,15 @@
+ 
+ #include <thrift/lib/cpp/transport/THeader.h>
+ 
++static size_t getQueueLength(const folly::IOBufQueue* queue) {
++  if (!queue || queue->empty()) {
++    return 0;
++  }
++  return queue->options().cacheChainLength
++      ? queue->chainLength()
++      : queue->front()->computeChainDataLength();
++}
++
+ #include <fmt/core.h>
+ #include <folly/Conv.h>
+ #include <folly/ExceptionString.h>
+@@ -278,18 +287,15 @@ unique_ptr<IOBuf> THeader::removeNonHeader(
+ unique_ptr<IOBuf> THeader::removeHeader(
+     IOBufQueue* queue,
+     size_t& needed,
+-    StringToStringMap& persistentReadHeaders) {
++    StringToStringMap& persistentReadHeaders,
++    size_t& frameLength) {
++  frameLength = 0;
+   if (!queue || queue->empty()) {
+     needed = 4;
+     return nullptr;
+   }
+   Cursor c(queue->front());
+-  size_t remaining;
+-  if (queue->options().cacheChainLength) {
+-    remaining = queue->chainLength();
+-  } else {
+-    remaining = queue->front()->computeChainDataLength();
+-  }
++  size_t remaining = getQueueLength(queue);
+   size_t frameSizeBytes = 4;
+   needed = 0;
+ 
+@@ -311,6 +317,7 @@ unique_ptr<IOBuf> THeader::removeHeader(
+     unique_ptr<IOBuf> buf =
+         THeader::removeNonHeader(queue, needed, clientType_, sz32);
+     if (buf) {
++      frameLength = remaining + frameSizeBytes - getQueueLength(queue);
+       return buf;
+     }
+   }
+@@ -318,7 +325,12 @@ unique_ptr<IOBuf> THeader::removeHeader(
+   auto clientT = THeader::analyzeFirst32bit(sz32);
+   if (clientT) {
+     clientType_ = *clientT;
+-    return THeader::removeNonHeader(queue, needed, *clientT, sz32);
++    unique_ptr<IOBuf> buf =
++        THeader::removeNonHeader(queue, needed, *clientT, sz32);
++    if (buf) {
++      frameLength = remaining + frameSizeBytes - getQueueLength(queue);
++    }
++    return buf;
+   }
+ 
+   size_t sz;
+@@ -380,6 +392,7 @@ unique_ptr<IOBuf> THeader::removeHeader(
+   unique_ptr<IOBuf> buf =
+       THeader::removeNonHeader(queue, needed, clientType_, sz);
+   if (buf) {
++    frameLength = remaining + frameSizeBytes - getQueueLength(queue);
+     return buf;
+   }
+ 
+@@ -401,6 +414,7 @@ unique_ptr<IOBuf> THeader::removeHeader(
+   // Trim off the frame size.
+   queue->trimStart(frameSizeBytes);
+   buf = readHeaderFormat(queue->split(sz), persistentReadHeaders);
++  frameLength = frameSizeBytes + sz;
+ 
+   return buf;
+ }
+diff --git a/thrift/lib/cpp/transport/THeader.h b/thrift/lib/cpp/transport/THeader.h
+index ca4f761ed9ef36be79d600c0c82f7021845c60be..d111a603c88d28424051020e65c5ca3f206472be 100644
+--- a/thrift/lib/cpp/transport/THeader.h
++++ b/thrift/lib/cpp/transport/THeader.h
+@@ -299,7 +299,8 @@ class THeader final {
+   std::unique_ptr<folly::IOBuf> removeHeader(
+       folly::IOBufQueue*,
+       size_t& needed,
+-      StringToStringMap& persistentReadHeaders);
++      StringToStringMap& persistentReadHeaders,
++      size_t& frameLength);
+ 
+   void setDesiredCompressionConfig(CompressionConfig compressionConfig) {
+     compressionConfig_ = compressionConfig;
+diff --git a/thrift/lib/cpp/transport/test/THeaderFrameLengthTest.cpp b/thrift/lib/cpp/transport/test/THeaderFrameLengthTest.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..e8846f7122959355b7c08e34dda86cc616a0ad1a
+--- /dev/null
++++ b/thrift/lib/cpp/transport/test/THeaderFrameLengthTest.cpp
+@@ -0,0 +1,298 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <thrift/lib/cpp/transport/THeader.h>
++
++#include <folly/io/IOBuf.h>
++#include <folly/io/IOBufQueue.h>
++#include <folly/portability/GTest.h>
++
++#include <algorithm>
++#include <cstring>
++#include <initializer_list>
++
++using namespace apache::thrift::transport;
++using namespace folly;
++
++static std::unique_ptr<IOBuf> makeHeaderMsg(
++    size_t sz, THeader::StringToStringMap& h) {
++  THeader hdr;
++  auto buf = IOBuf::create(sz);
++  if (sz > 0)
++    buf->writableData()[0] = 0x80;
++  std::memset(buf->writableData() + 1, 'X', sz > 1 ? sz - 1 : 0);
++  buf->append(sz);
++  return hdr.addHeader(std::move(buf), h);
++}
++
++static std::unique_ptr<IOBuf> makeBytes(
++    std::initializer_list<uint8_t> bytes, size_t capacity = 0) {
++  auto buf = IOBuf::create(std::max(capacity, bytes.size()));
++  std::copy(bytes.begin(), bytes.end(), buf->writableData());
++  buf->append(bytes.size());
++  return buf;
++}
++
++static std::unique_ptr<IOBuf> makeLengthPrefixed(
++    uint32_t declaredSize, std::initializer_list<uint8_t> payload) {
++  auto buf = IOBuf::create(4 + payload.size());
++  auto* out = buf->writableData();
++  out[0] = (declaredSize >> 24) & 0xff;
++  out[1] = (declaredSize >> 16) & 0xff;
++  out[2] = (declaredSize >> 8) & 0xff;
++  out[3] = declaredSize & 0xff;
++  std::copy(payload.begin(), payload.end(), out + 4);
++  buf->append(4 + payload.size());
++  return buf;
++}
++
++TEST(THeaderFrameLengthTest, NullQueue) {
++  THeader h;
++  size_t n = 0, fl = 999;
++  THeader::StringToStringMap ph;
++  EXPECT_EQ(nullptr, h.removeHeader(nullptr, n, ph, fl));
++  EXPECT_EQ(0u, fl);
++}
++
++TEST(THeaderFrameLengthTest, EmptyQueue) {
++  THeader h;
++  size_t n = 0, fl = 999;
++  THeader::StringToStringMap ph;
++  IOBufQueue q;
++  EXPECT_EQ(nullptr, h.removeHeader(&q, n, ph, fl));
++  EXPECT_EQ(0u, fl);
++}
++
++TEST(THeaderFrameLengthTest, ShortQueueReportsExactNeededBytes) {
++  IOBufQueue q;
++  q.append(makeBytes({0x00, 0x00}));
++  THeader h;
++  size_t n = 0, fl = 999;
++  THeader::StringToStringMap ph;
++  EXPECT_EQ(nullptr, h.removeHeader(&q, n, ph, fl));
++  EXPECT_EQ(2u, n);
++  EXPECT_EQ(0u, fl);
++}
++
++TEST(THeaderFrameLengthTest, NormalHeader) {
++  THeader::StringToStringMap ph;
++  IOBufQueue q;
++  auto frame = makeHeaderMsg(100, ph);
++  const auto expectedFrameLength = frame->computeChainDataLength();
++  q.append(std::move(frame));
++  q.append(makeBytes({0xaa, 0xbb, 0xcc}));
++  THeader h;
++  size_t n = 0, fl = 0;
++  auto buf = h.removeHeader(&q, n, ph, fl);
++  ASSERT_NE(nullptr, buf);
++  EXPECT_EQ(expectedFrameLength, fl);
++  EXPECT_EQ(3u, q.front()->computeChainDataLength());
++}
++
++TEST(THeaderFrameLengthTest, CachedQueueFrameLength) {
++  THeader::StringToStringMap ph;
++  IOBufQueue q(IOBufQueue::cacheChainLength());
++  auto frame = makeHeaderMsg(32, ph);
++  const auto expectedFrameLength = frame->computeChainDataLength();
++  q.append(std::move(frame));
++  q.append(makeBytes({0xaa, 0xbb}));
++  THeader h;
++  size_t n = 0, fl = 0;
++  ASSERT_NE(nullptr, h.removeHeader(&q, n, ph, fl));
++  EXPECT_EQ(expectedFrameLength, fl);
++  EXPECT_EQ(2u, q.chainLength());
++}
++
++TEST(THeaderFrameLengthTest, IncompleteFramedMessage) {
++  IOBufQueue q;
++  q.append(makeLengthPrefixed(12, {0x80, 0x01, 0x00, 0x01}));
++  THeader h;
++  size_t n = 0, fl = 999;
++  THeader::StringToStringMap ph;
++  EXPECT_EQ(nullptr, h.removeHeader(&q, n, ph, fl));
++  EXPECT_EQ(8u, n);
++  EXPECT_EQ(0u, fl);
++  EXPECT_EQ(8u, q.front()->computeChainDataLength());
++}
++
++TEST(THeaderFrameLengthTest, ForcedClientTypeIncompleteFrame) {
++  IOBufQueue q;
++  q.append(makeLengthPrefixed(12, {0x80, 0x01, 0x00, 0x01}));
++  THeader h;
++  h.setClientType(THRIFT_FRAMED_DEPRECATED);
++  h.forceClientType(true);
++  size_t n = 0, fl = 999;
++  THeader::StringToStringMap ph;
++  EXPECT_EQ(nullptr, h.removeHeader(&q, n, ph, fl));
++  EXPECT_EQ(8u, n);
++  EXPECT_EQ(0u, fl);
++}
++
++TEST(THeaderFrameLengthTest, ForceClientType) {
++  size_t ps = 12;
++  uint32_t fs = ps;
++  size_t extra = 10;
++  auto f = IOBuf::create(4 + ps + extra);
++  f->writableData()[0] = (fs >> 24) & 0xFF;
++  f->writableData()[1] = (fs >> 16) & 0xFF;
++  f->writableData()[2] = (fs >> 8) & 0xFF;
++  f->writableData()[3] = fs & 0xFF;
++  f->writableData()[4] = 0x80;
++  f->writableData()[5] = 0x01;
++  f->writableData()[6] = 0;
++  f->writableData()[7] = 0x01;
++  std::memset(f->writableData() + 8, 0, ps - 4);
++  std::memset(f->writableData() + 4 + ps, 'E', extra);
++  f->append(4 + ps + extra);
++  IOBufQueue q;
++  q.append(std::move(f));
++  THeader h;
++  h.setClientType(THRIFT_FRAMED_DEPRECATED);
++  h.forceClientType(true);
++  THeader::StringToStringMap ph;
++  size_t n = 0, fl = 0;
++  auto buf_fc = h.removeHeader(&q, n, ph, fl);
++  ASSERT_NE(nullptr, buf_fc);
++  EXPECT_EQ(4 + ps, fl); // frame header(4) + payload
++}
++
++TEST(THeaderFrameLengthTest, UnframedBinary) {
++  uint8_t data[] = {0x80, 0x01, 0, 0x01, 0, 0, 0, 0, 0x01, 0, 0, 0, 0};
++  size_t sz = sizeof(data);
++  auto full = IOBuf::create(sz + 10);
++  std::memcpy(full->writableData(), data, sz);
++  std::memset(full->writableData() + sz, 'E', 10);
++  full->append(sz + 10);
++  IOBufQueue q;
++  q.append(std::move(full));
++  THeader h;
++  THeader::StringToStringMap ph;
++  size_t n = 0, fl = 0;
++  auto buf_ub = h.removeHeader(&q, n, ph, fl);
++  ASSERT_NE(nullptr, buf_ub);
++  EXPECT_EQ(sz, fl); // sz is the TBinaryProtocol frame size
++}
++
++TEST(THeaderFrameLengthTest, FramedBinary) {
++  uint8_t payload[] = {0x80, 0x01, 0, 0x01, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0x00};
++  uint32_t ps = sizeof(payload);
++  auto full = IOBuf::create(4 + ps + 10);
++  full->writableData()[0] = (ps >> 24) & 0xFF;
++  full->writableData()[1] = (ps >> 16) & 0xFF;
++  full->writableData()[2] = (ps >> 8) & 0xFF;
++  full->writableData()[3] = ps & 0xFF;
++  std::memcpy(full->writableData() + 4, payload, ps);
++  std::memset(full->writableData() + 4 + ps, 'E', 10);
++  full->append(4 + ps + 10);
++  IOBufQueue q;
++  q.append(std::move(full));
++  THeader h;
++  THeader::StringToStringMap ph;
++  size_t n = 0, fl = 0;
++  auto buf_fb = h.removeHeader(&q, n, ph, fl);
++  ASSERT_NE(nullptr, buf_fb);
++  EXPECT_EQ(4 + ps, fl); // frame header(4) + payload
++}
++
++TEST(THeaderFrameLengthTest, BigFrameRejectedByDefault) {
++  IOBufQueue q;
++  q.append(makeBytes({0x42, 0x49, 0x47, 0x46}));
++  THeader h;
++  size_t n = 0, fl = 999;
++  THeader::StringToStringMap ph;
++  EXPECT_THROW(h.removeHeader(&q, n, ph, fl), TTransportException);
++  EXPECT_EQ(0u, fl);
++}
++
++TEST(THeaderFrameLengthTest, IncompleteBigFrameSize) {
++  IOBufQueue q;
++  q.append(makeBytes({0x42, 0x49, 0x47, 0x46, 0x00, 0x00, 0x00, 0x00}));
++  THeader h(THeader::ALLOW_BIG_FRAMES);
++  size_t n = 0, fl = 999;
++  THeader::StringToStringMap ph;
++  EXPECT_EQ(nullptr, h.removeHeader(&q, n, ph, fl));
++  EXPECT_EQ(4u, n);
++  EXPECT_EQ(0u, fl);
++}
++
++TEST(THeaderFrameLengthTest, IncompleteBigFramePayload) {
++  IOBufQueue q;
++  q.append(makeBytes(
++      {0x42,
++       0x49,
++       0x47,
++       0x46,
++       0x00,
++       0x00,
++       0x00,
++       0x00,
++       0x00,
++       0x00,
++       0x00,
++       0x10,
++       0x0f,
++       0xff,
++       0x00,
++       0x00}));
++  THeader h(THeader::ALLOW_BIG_FRAMES);
++  size_t n = 0, fl = 999;
++  THeader::StringToStringMap ph;
++  EXPECT_EQ(nullptr, h.removeHeader(&q, n, ph, fl));
++  EXPECT_EQ(12u, n);
++  EXPECT_EQ(0u, fl);
++}
++
++TEST(THeaderFrameLengthTest, AsciiFrameSizeThrowsAndResetsLength) {
++  IOBufQueue q;
++  q.append(makeBytes({'P', 'I', 'N', 'G'}));
++  THeader h;
++  size_t n = 0, fl = 999;
++  THeader::StringToStringMap ph;
++  EXPECT_THROW(h.removeHeader(&q, n, ph, fl), TTransportException);
++  EXPECT_EQ(0u, fl);
++}
++
++TEST(THeaderFrameLengthTest, UnknownTransportMagicThrowsAndResetsLength) {
++  IOBufQueue q;
++  q.append(makeLengthPrefixed(4, {0x12, 0x34, 0x56, 0x78}));
++  THeader h;
++  size_t n = 0, fl = 999;
++  THeader::StringToStringMap ph;
++  EXPECT_THROW(h.removeHeader(&q, n, ph, fl), TTransportException);
++  EXPECT_EQ(0u, fl);
++}
++
++TEST(THeaderFrameLengthTest, HeaderFrameTooSmallThrowsAndResetsLength) {
++  IOBufQueue q;
++  q.append(
++      makeLengthPrefixed(8, {0x0f, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}));
++  THeader h;
++  size_t n = 0, fl = 999;
++  THeader::StringToStringMap ph;
++  EXPECT_THROW(h.removeHeader(&q, n, ph, fl), TTransportException);
++  EXPECT_EQ(0u, fl);
++}
++
++TEST(THeaderFrameLengthTest, InvalidHeaderSizeThrowsAndResetsLength) {
++  IOBufQueue q;
++  q.append(makeLengthPrefixed(
++      10, {0x0f, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}));
++  THeader h;
++  size_t n = 0, fl = 999;
++  THeader::StringToStringMap ph;
++  EXPECT_THROW(h.removeHeader(&q, n, ph, fl), TTransportException);
++  EXPECT_EQ(0u, fl);
++}
+diff --git a/thrift/lib/cpp/transport/test/THeaderTest.cpp b/thrift/lib/cpp/transport/test/THeaderTest.cpp
+index 4dbd593ac67d788e76985e9de9733019c26df463..e667a74b7a89b75f73bb4323340236ec707f0b65 100644
+--- a/thrift/lib/cpp/transport/test/THeaderTest.cpp
++++ b/thrift/lib/cpp/transport/test/THeaderTest.cpp
+@@ -61,8 +61,9 @@ TEST(THeaderTest, largetransform) {
+   queue2->append(queue->move());
+ 
+   size_t needed;
++  size_t frameLength;
+ 
+-  buf = header.removeHeader(queue2.get(), needed, persistentHeaders);
++  buf = header.removeHeader(queue2.get(), needed, persistentHeaders, frameLength);
+   EXPECT_EQ(buf->computeChainDataLength(), 10000000);
+ }
+ 
+@@ -99,17 +100,19 @@ TEST(THeaderTest, eraseReadHeader) {
+ TEST(THeaderTest, removeHeaderNullptrQueue) {
+   THeader header;
+   size_t needed;
++  size_t frameLength;
+   THeader::StringToStringMap persistentHeaders;
+-  EXPECT_EQ(nullptr, header.removeHeader(nullptr, needed, persistentHeaders));
++  EXPECT_EQ(nullptr, header.removeHeader(nullptr, needed, persistentHeaders, frameLength));
+   EXPECT_EQ(4, needed);
+ }
+ 
+ TEST(THeaderTest, removeHeaderEmptyQueue) {
+   THeader header;
+   size_t needed;
++  size_t frameLength;
+   THeader::StringToStringMap persistentHeaders;
+   IOBufQueue queue(IOBufQueue::cacheChainLength());
+-  EXPECT_EQ(nullptr, header.removeHeader(&queue, needed, persistentHeaders));
++  EXPECT_EQ(nullptr, header.removeHeader(&queue, needed, persistentHeaders, frameLength));
+   EXPECT_EQ(4, needed);
+ }
+ 
+@@ -167,8 +170,9 @@ void testAsciiHeaderData(const std::string& data, const std::string& expected) {
+   queue->append(std::move(buf));
+ 
+   size_t needed;
++  size_t frameLength;
+   try {
+-    buf = header.removeHeader(queue.get(), needed, persistentHeaders);
++    buf = header.removeHeader(queue.get(), needed, persistentHeaders, frameLength);
+     ASSERT_TRUE(false);
+   } catch (TTransportException& e) {
+     ASSERT_EQ(e.what(), expected);
+diff --git a/thrift/lib/cpp2/CMakeLists.txt b/thrift/lib/cpp2/CMakeLists.txt
+index 71b60187471b8b2af34d1be06d9314ba7cff1523..784b1697578cbed06b3fa7b5d1fc26d30d875c35 100644
+--- a/thrift/lib/cpp2/CMakeLists.txt
++++ b/thrift/lib/cpp2/CMakeLists.txt
+@@ -87,6 +87,7 @@ add_library(
+   ${metadata-cpp2-SOURCES}
+   gen/module_types_cpp.cpp
+   protocol/CompactProtocol.cpp # can't link against thriftprotocol, dep cycle
++  protocol/CompactProtocolSve.cpp
+   ../cpp/protocol/TProtocolException.cpp
+   ../cpp/util/VarintUtils.cpp
+ )
+@@ -184,6 +185,7 @@ add_library(
+   ${RpcMetadata-cpp2-SOURCES}
+   gen/module_types_cpp.cpp
+   protocol/CompactProtocol.cpp # can't link against thriftprotocol, dep cycle
++  protocol/CompactProtocolSve.cpp
+   protocol/JSONProtocolCommon.cpp
+   ../cpp/protocol/TBase64Utils.cpp
+   ../cpp/protocol/TJSONProtocol.cpp
+@@ -204,6 +206,7 @@ add_library(
+   protocol/Protocol.cpp
+   protocol/BinaryProtocol.cpp
+   protocol/CompactProtocol.cpp
++  protocol/CompactProtocolSve.cpp
+   protocol/CompactV1Protocol.cpp
+   protocol/DebugProtocol.cpp
+   protocol/JSONProtocol.cpp
+@@ -233,6 +236,25 @@ target_link_libraries(
+     thrift-core
+ )
+ 
++# -----------------------------------------------------------------------------
++# Apply the ARM SVE2 compile flags to CompactProtocolSve.cpp ONLY.
++#
++# Because CompactProtocolSve.cpp is linked into thriftmetadata, rpcmetadata and
++# thriftprotocol, we attach the flags through set_source_files_properties so
++# they apply to every object-file copy of this source (CMake builds the same
++# .cpp once per library target). No other TU in fbthrift sees -march or
++# THRIFT_HAS_ARM_SVE2, which keeps their codegen byte-identical to pre-patch.
++# -----------------------------------------------------------------------------
++if(THRIFT_ENABLE_ARM_SVE2 AND THRIFT_ARM_SVE2_FLAGS)
++  set_source_files_properties(
++    protocol/CompactProtocolSve.cpp
++    PROPERTIES
++      COMPILE_OPTIONS       "${THRIFT_ARM_SVE2_FLAGS}"
++      COMPILE_DEFINITIONS   "THRIFT_HAS_ARM_SVE2"
++
++  )
++endif()
++
+ bypass_source_check("${RocketUpgrade-cpp2-SOURCES}")
+ add_library(
+   thriftcpp2
+@@ -397,3 +419,7 @@ install(
+   EXPORT fbthrift-exports
+   DESTINATION ${LIB_INSTALL_DIR}
+ )
++
++if(enable_tests)
++  add_subdirectory(test)
++endif()
+\ No newline at end of file
+diff --git a/thrift/lib/cpp2/async/DuplexChannel.cpp b/thrift/lib/cpp2/async/DuplexChannel.cpp
+index 84196f099efe09db7aa5f5bfc7a8618eb2d2e241..39e7bfce215c80789759721b57027534cf53803d 100644
+--- a/thrift/lib/cpp2/async/DuplexChannel.cpp
++++ b/thrift/lib/cpp2/async/DuplexChannel.cpp
+@@ -61,17 +61,17 @@ FramingHandler& DuplexChannel::DuplexFramingHandler::getHandler(
+   }
+ }
+ 
+-std::tuple<std::unique_ptr<folly::IOBuf>, size_t, std::unique_ptr<THeader>>
++std::tuple<std::unique_ptr<folly::IOBuf>, size_t, std::unique_ptr<THeader>, size_t>
+ DuplexChannel::DuplexFramingHandler::removeFrame(folly::IOBufQueue* q) {
+   if (!q || !q->front() || q->front()->empty()) {
+-    return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr);
++    return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr, 0);
+   }
+ 
+   uint32_t len = q->front()->computeChainDataLength();
+ 
+   if (len < 4) {
+     size_t remaining = 4 - len;
+-    return make_tuple(unique_ptr<IOBuf>(), remaining, nullptr);
++    return make_tuple(unique_ptr<IOBuf>(), remaining, nullptr, 0);
+   }
+ 
+   Cursor c(q->front());
+@@ -86,7 +86,7 @@ DuplexChannel::DuplexFramingHandler::removeFrame(folly::IOBufQueue* q) {
+   if (len - 4 < msgLen) {
+     // Framed message, but haven't received whole message yet
+     size_t remaining = msgLen - (len - 4);
+-    return make_tuple(unique_ptr<IOBuf>(), remaining, nullptr);
++    return make_tuple(unique_ptr<IOBuf>(), remaining, nullptr, 0);
+   }
+ 
+   // Got whole message, check if it's header
+diff --git a/thrift/lib/cpp2/async/DuplexChannel.h b/thrift/lib/cpp2/async/DuplexChannel.h
+index 58a6bcb6c098a020727759bf6b50f8f793ca2e85..bfe54f8e9da2803d28c49ec4e8995a45c3139968 100644
+--- a/thrift/lib/cpp2/async/DuplexChannel.h
++++ b/thrift/lib/cpp2/async/DuplexChannel.h
+@@ -184,7 +184,8 @@ class DuplexChannel {
+     std::tuple<
+         std::unique_ptr<folly::IOBuf>,
+         size_t,
+-        std::unique_ptr<apache::thrift::transport::THeader>>
++        std::unique_ptr<apache::thrift::transport::THeader>,
++        size_t>
+     removeFrame(folly::IOBufQueue* q) override;
+ 
+     std::unique_ptr<folly::IOBuf> addFrame(
+diff --git a/thrift/lib/cpp2/async/FramingHandler.cpp b/thrift/lib/cpp2/async/FramingHandler.cpp
+index af3c43d544475baba29d53af5d0198b925b9c994..a870ec2cb6e3d1200377a779e8112decdedee65b 100644
+--- a/thrift/lib/cpp2/async/FramingHandler.cpp
++++ b/thrift/lib/cpp2/async/FramingHandler.cpp
+@@ -33,9 +33,10 @@ void FramingHandler::read(Context* ctx, folly::IOBufQueue& q) {
+   while (!closing_) {
+     std::unique_ptr<folly::IOBuf> unframed;
+     std::unique_ptr<apache::thrift::transport::THeader> header;
++    size_t frameLength = 0;
+     auto ex = folly::try_and_catch([&]() {
+       // got a decrypted message
+-      std::tie(unframed, remaining, header) = removeFrame(&q);
++      std::tie(unframed, remaining, header, frameLength) = removeFrame(&q);
+     });
+ 
+     if (ex) {
+@@ -45,11 +46,24 @@ void FramingHandler::read(Context* ctx, folly::IOBufQueue& q) {
+       return;
+     }
+ 
++    auto refreshReadBuffer = [&]() {
++      size_t readSize;
++      if (strict_) {
++        readSize = readBufferSize_;
++      } else {
++        readSize = std::clamp(avgRequestSize_ * kReadBufferMultiplier, size_t{2048}, size_t{524288});
++      }
++      size_t remainLen = std::max(remaining, q.tailroom());
++      ctx->setReadBufferSettings(readSize, remainLen > 0 ? remainLen : readSize);
++    };
++
+     if (!unframed) {
+-      ctx->setReadBufferSettings(
+-          readBufferSize_, remaining ? remaining : readBufferSize_);
++      refreshReadBuffer();
+       return;
+     } else {
++      avgRequestSize_ = (avgRequestSize_ == 0) ? frameLength :
++          (avgRequestSize_ * (kAvgWindowSamples - 1) + frameLength) / kAvgWindowSamples;
++      refreshReadBuffer();
+       ctx->fireRead(std::make_pair(std::move(unframed), std::move(header)));
+     }
+   }
+diff --git a/thrift/lib/cpp2/async/FramingHandler.h b/thrift/lib/cpp2/async/FramingHandler.h
+index 5184c3103fb922791928e4dc0aac8e06bbe25460..bc38daaa2c48dfc93d5a7d6dce614a084f137fda 100644
+--- a/thrift/lib/cpp2/async/FramingHandler.h
++++ b/thrift/lib/cpp2/async/FramingHandler.h
+@@ -55,7 +55,8 @@ class FramingHandler
+   virtual std::tuple<
+       std::unique_ptr<folly::IOBuf>,
+       size_t,
+-      std::unique_ptr<apache::thrift::transport::THeader>>
++      std::unique_ptr<apache::thrift::transport::THeader>,
++      size_t>
+   removeFrame(folly::IOBufQueue* q) = 0;
+ 
+   /**
+@@ -73,6 +74,7 @@ class FramingHandler
+    *                         means given size may not be used if it is too small
+    */
+   void setReadBufferSize(size_t readBufferSize, bool strict = false) {
++    strict_ = strict;
+     readBufferSize_ = strict
+         ? readBufferSize
+         : std::max<size_t>(readBufferSize, DEFAULT_BUFFER_SIZE);
+@@ -86,8 +88,14 @@ class FramingHandler
+   };
+ 
+   size_t readBufferSize_{DEFAULT_BUFFER_SIZE};
++  bool strict_{false};
+ 
+   bool closing_{false};
++
++  // 最近请求大小的滑动平均值，用于自适应调整读缓冲区
++  size_t avgRequestSize_{0};
++  static constexpr size_t kAvgWindowSamples = 10;
++  static constexpr size_t kReadBufferMultiplier = 16;
+ };
+ 
+ } // namespace thrift
+diff --git a/thrift/lib/cpp2/async/HeaderClientChannel.cpp b/thrift/lib/cpp2/async/HeaderClientChannel.cpp
+index cab380fbac8b7abe2cbbf9c532d9fc29374c8309..da1ec8acb40784613b47772b114095ce25a9f8ea 100644
+--- a/thrift/lib/cpp2/async/HeaderClientChannel.cpp
++++ b/thrift/lib/cpp2/async/HeaderClientChannel.cpp
+@@ -340,21 +340,22 @@ HeaderClientChannel::ClientFramingHandler::addFrame(
+   return header->addHeader(std::move(buf), persistentWriteHeaders);
+ }
+ 
+-std::tuple<std::unique_ptr<IOBuf>, size_t, std::unique_ptr<THeader>>
++std::tuple<std::unique_ptr<IOBuf>, size_t, std::unique_ptr<THeader>, size_t>
+ HeaderClientChannel::ClientFramingHandler::removeFrame(IOBufQueue* q) {
+   std::unique_ptr<THeader> header(new THeader(THeader::ALLOW_BIG_FRAMES));
+   if (!q || !q->front() || q->front()->empty()) {
+-    return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr);
++    return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr, 0);
+   }
+ 
+   size_t remaining = 0;
++  size_t frameLength = 0;
+   std::unique_ptr<folly::IOBuf> buf =
+-      header->removeHeader(q, remaining, channel_.persistentReadHeaders_);
++      header->removeHeader(q, remaining, channel_.persistentReadHeaders_, frameLength);
+   if (!buf) {
+-    return make_tuple(std::unique_ptr<folly::IOBuf>(), remaining, nullptr);
++    return make_tuple(std::unique_ptr<IOBuf>(), remaining, nullptr, 0);
+   }
+   HeaderChannelTrait::checkSupportedClient(header->getClientType());
+-  return make_tuple(std::move(buf), 0, std::move(header));
++  return make_tuple(std::move(buf), 0, std::move(header), frameLength);
+ }
+ 
+ // Interface from MessageChannel::RecvCallback
+diff --git a/thrift/lib/cpp2/async/HeaderClientChannel.h b/thrift/lib/cpp2/async/HeaderClientChannel.h
+index 863d82799f45a9df2f9e1cf243b14b2ce624f701..1e2202aa910d867de1687c596dd390a9307aa9ce 100644
+--- a/thrift/lib/cpp2/async/HeaderClientChannel.h
++++ b/thrift/lib/cpp2/async/HeaderClientChannel.h
+@@ -243,7 +243,8 @@ class HeaderClientChannel : public ClientChannel,
+     std::tuple<
+         std::unique_ptr<folly::IOBuf>,
+         size_t,
+-        std::unique_ptr<apache::thrift::transport::THeader>>
++        std::unique_ptr<apache::thrift::transport::THeader>,
++        size_t>
+     removeFrame(folly::IOBufQueue* q) override;
+ 
+     std::unique_ptr<folly::IOBuf> addFrame(
+diff --git a/thrift/lib/cpp2/async/HeaderServerChannel.cpp b/thrift/lib/cpp2/async/HeaderServerChannel.cpp
+index ab617fe3d8fe4d490ed66e799584e08e188b12bb..13d2f3275e4b0baa2c4d39bc91ac39ce4555eb4a 100644
+--- a/thrift/lib/cpp2/async/HeaderServerChannel.cpp
++++ b/thrift/lib/cpp2/async/HeaderServerChannel.cpp
+@@ -76,20 +76,21 @@ unique_ptr<IOBuf> HeaderServerChannel::ServerFramingHandler::addFrame(
+       false /* Data already transformed in AsyncProcessor.h */);
+ }
+ 
+-std::tuple<unique_ptr<IOBuf>, size_t, unique_ptr<THeader>>
++std::tuple<unique_ptr<IOBuf>, size_t, unique_ptr<THeader>, size_t>
+ HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
+   std::unique_ptr<THeader> header(new THeader(THeader::ALLOW_BIG_FRAMES));
+   // removeHeader will set seqid in header.
+   // For older clients with seqid in the protocol, header
+   // will dig in to the protocol to get the seqid correctly.
+   if (!q || !q->front() || q->front()->empty()) {
+-    return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr);
++    return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr, 0);
+   }
+ 
+   std::unique_ptr<folly::IOBuf> buf;
+   size_t remaining = 0;
++  size_t frameLength = 0;
+   try {
+-    buf = header->removeHeader(q, remaining, channel_.persistentReadHeaders_);
++    buf = header->removeHeader(q, remaining, channel_.persistentReadHeaders_, frameLength);
+   } catch (const std::exception& e) {
+     LOG(ERROR) << "Received invalid request from client: "
+                << folly::exceptionStr(e) << " "
+@@ -97,7 +98,7 @@ HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
+     throw;
+   }
+   if (!buf) {
+-    return make_tuple(std::unique_ptr<IOBuf>(), remaining, nullptr);
++    return make_tuple(std::unique_ptr<IOBuf>(), remaining, nullptr, 0);
+   }
+ 
+   CLIENT_TYPE ct = header->getClientType();
+@@ -143,7 +144,7 @@ HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
+                << getTHeaderPayloadString(buf.get());
+   }
+ 
+-  return make_tuple(std::move(buf), 0, std::move(header));
++  return make_tuple(std::move(buf), 0, std::move(header), frameLength);
+ }
+ 
+ std::string HeaderServerChannel::getTHeaderPayloadString(IOBuf* buf) {
+diff --git a/thrift/lib/cpp2/async/HeaderServerChannel.h b/thrift/lib/cpp2/async/HeaderServerChannel.h
+index e0108b1a3f41a8fd597038a5bc32cee8b68cb9d6..190fc139ecdf9bd5861a026d57273d8e6e38874f 100644
+--- a/thrift/lib/cpp2/async/HeaderServerChannel.h
++++ b/thrift/lib/cpp2/async/HeaderServerChannel.h
+@@ -197,7 +197,8 @@ class HeaderServerChannel : public ServerChannel,
+     std::tuple<
+         std::unique_ptr<folly::IOBuf>,
+         size_t,
+-        std::unique_ptr<apache::thrift::transport::THeader>>
++        std::unique_ptr<apache::thrift::transport::THeader>,
++        size_t>
+     removeFrame(folly::IOBufQueue* q) override;
+ 
+     std::unique_ptr<folly::IOBuf> addFrame(
+diff --git a/thrift/lib/cpp2/async/tests/FramingHandlerTest.cpp b/thrift/lib/cpp2/async/tests/FramingHandlerTest.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..79f604831f49350d07093b0d37b13459c2fd3142
+--- /dev/null
++++ b/thrift/lib/cpp2/async/tests/FramingHandlerTest.cpp
+@@ -0,0 +1,450 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <folly/init/Init.h>
++#include <folly/io/Cursor.h>
++#include <folly/io/IOBuf.h>
++#include <folly/io/IOBufQueue.h>
++#include <folly/io/async/AsyncSocket.h>
++#include <folly/io/async/EventBase.h>
++#include <folly/lang/Bits.h>
++#include <folly/portability/GTest.h>
++#include <wangle/channel/Handler.h>
++
++#include <thrift/lib/cpp/transport/THeader.h>
++#include <thrift/lib/cpp2/async/FramingHandler.h>
++#include <thrift/lib/cpp2/async/HeaderClientChannel.h>
++#include <thrift/lib/cpp2/async/HeaderServerChannel.h>
++
++#include <cstring>
++#include <stdexcept>
++
++using namespace apache::thrift;
++using namespace apache::thrift::transport;
++using namespace folly;
++
++static std::unique_ptr<IOBuf> makeHeaderMsg(
++    size_t sz, THeader::StringToStringMap& h) {
++  THeader hdr;
++  auto buf = IOBuf::create(sz);
++  if (sz > 0)
++    buf->writableData()[0] = 0x80;
++  std::memset(buf->writableData() + 1, 'X', sz > 1 ? sz - 1 : 0);
++  buf->append(sz);
++  return hdr.addHeader(std::move(buf), h);
++}
++
++static std::shared_ptr<AsyncTransport> makeTransport() {
++  static EventBase evb;
++  return AsyncSocket::newSocket(&evb);
++}
++
++// HeaderServerChannel::ServerFramingHandler::removeFrame
++
++TEST(ServerFramingHandlerTest, RemoveFrame) {
++  auto transport = makeTransport();
++  auto channel = HeaderServerChannel::newChannel(transport);
++  HeaderServerChannel::ServerFramingHandler handler(*channel);
++  THeader::StringToStringMap ph;
++  IOBufQueue q;
++  q.append(makeHeaderMsg(100, ph));
++  auto [buf, rem, hdr, fl] = handler.removeFrame(&q);
++  ASSERT_NE(nullptr, buf);
++  EXPECT_GT(fl, 0u);
++}
++
++TEST(ServerFramingHandlerTest, RemoveFrameEmpty) {
++  auto transport = makeTransport();
++  auto channel = HeaderServerChannel::newChannel(transport);
++  HeaderServerChannel::ServerFramingHandler handler(*channel);
++  IOBufQueue q;
++  auto [buf, rem, hdr, fl] = handler.removeFrame(&q);
++  EXPECT_EQ(nullptr, buf);
++  EXPECT_EQ(0u, fl);
++}
++
++TEST(ServerFramingHandlerTest, RemoveFrameNull) {
++  auto transport = makeTransport();
++  auto channel = HeaderServerChannel::newChannel(transport);
++  HeaderServerChannel::ServerFramingHandler handler(*channel);
++  auto [buf, rem, hdr, fl] = handler.removeFrame(nullptr);
++  EXPECT_EQ(nullptr, buf);
++  EXPECT_EQ(0u, fl);
++}
++
++// HeaderClientChannel::ClientFramingHandler::removeFrame
++
++TEST(ClientFramingHandlerTest, RemoveFrameValidMessage) {
++  static EventBase evb;
++  folly::AsyncTransport::UniquePtr transport(
++      folly::AsyncSocket::newSocket(&evb));
++  auto channel = HeaderClientChannel::newChannel(
++      HeaderClientChannel::WithoutRocketUpgrade{}, std::move(transport));
++  HeaderClientChannel::ClientFramingHandler handler(*channel);
++  THeader::StringToStringMap ph;
++  IOBufQueue q;
++  q.append(makeHeaderMsg(100, ph));
++  auto [buf, rem, hdr, fl] = handler.removeFrame(&q);
++  ASSERT_NE(nullptr, buf);
++  EXPECT_GT(fl, 0u);
++}
++
++TEST(ClientFramingHandlerTest, RemoveFrameEmpty) {
++  static EventBase evb;
++  folly::AsyncTransport::UniquePtr transport(
++      folly::AsyncSocket::newSocket(&evb));
++  auto channel = HeaderClientChannel::newChannel(
++      HeaderClientChannel::WithoutRocketUpgrade{}, std::move(transport));
++  HeaderClientChannel::ClientFramingHandler handler(*channel);
++  IOBufQueue q;
++  auto [buf, rem, hdr, fl] = handler.removeFrame(&q);
++  EXPECT_EQ(nullptr, buf);
++  EXPECT_EQ(0u, fl);
++}
++
++TEST(ClientFramingHandlerTest, RemoveFrameNull) {
++  static EventBase evb;
++  folly::AsyncTransport::UniquePtr transport(
++      folly::AsyncSocket::newSocket(&evb));
++  auto channel = HeaderClientChannel::newChannel(
++      HeaderClientChannel::WithoutRocketUpgrade{}, std::move(transport));
++  HeaderClientChannel::ClientFramingHandler handler(*channel);
++  auto [buf, rem, hdr, fl] = handler.removeFrame(nullptr);
++  EXPECT_EQ(nullptr, buf);
++  EXPECT_EQ(0u, fl);
++}
++
++// FramingHandler::read — covers refreshReadBuffer + avgRequestSize_ sliding
++// window
++
++using FramedMessage =
++    std::pair<std::unique_ptr<IOBuf>, std::unique_ptr<THeader>>;
++using OutboundFramedMessage = std::pair<std::unique_ptr<IOBuf>, THeader*>;
++
++class RecordingHandler : public wangle::Handler<
++                             FramedMessage,
++                             FramedMessage,
++                             std::unique_ptr<IOBuf>,
++                             OutboundFramedMessage> {
++ public:
++  std::vector<size_t> frameLengths;
++  size_t exceptionCount{0};
++  void read(
++      Context* ctx,
++      std::pair<std::unique_ptr<IOBuf>, std::unique_ptr<THeader>> msg)
++      override {
++    frameLengths.push_back(msg.first->computeChainDataLength());
++    ctx->fireRead(std::move(msg));
++  }
++
++  folly::Future<folly::Unit> write(
++      Context* ctx, std::unique_ptr<IOBuf> msg) override {
++    return ctx->fireWrite(std::make_pair(std::move(msg), nullptr));
++  }
++
++  void readException(Context*, folly::exception_wrapper) override {
++    ++exceptionCount;
++  }
++};
++
++class CloseRecordingHandler
++    : public wangle::HandlerAdapter<IOBufQueue&, std::unique_ptr<IOBuf>> {
++ public:
++  size_t closeCount{0};
++  std::vector<size_t> writtenLengths;
++
++  folly::Future<folly::Unit> close(Context* ctx) override {
++    ++closeCount;
++    return ctx->fireClose();
++  }
++
++  folly::Future<folly::Unit> write(
++      Context*, std::unique_ptr<IOBuf> msg) override {
++    writtenLengths.push_back(msg->computeChainDataLength());
++    return folly::makeFuture(folly::Unit{});
++  }
++};
++
++class MockFramingHandler : public FramingHandler {
++ public:
++  bool throwOnRemove{false};
++  bool emitZeroLengthFrame{false};
++
++  std::tuple<std::unique_ptr<IOBuf>, size_t, std::unique_ptr<THeader>, size_t>
++  removeFrame(IOBufQueue* q) override {
++    if (throwOnRemove) {
++      throw std::runtime_error("test framing failure");
++    }
++    if (emitZeroLengthFrame) {
++      emitZeroLengthFrame = false;
++      return {IOBuf::create(0), 0, nullptr, 0};
++    }
++    if (!q || !q->front() || q->front()->empty()) {
++      return {nullptr, 0, nullptr, 0};
++    }
++
++    // Simulate framed protocol: first 4 bytes = frame length
++    size_t total = q->front()->computeChainDataLength();
++    if (total < 4) {
++      return {nullptr, 4 - total, nullptr, 0};
++    }
++
++    folly::io::Cursor c(q->front());
++    uint32_t frameLen = c.readBE<uint32_t>();
++    size_t frameTotal = 4 + frameLen;
++
++    if (total < frameTotal) {
++      return {nullptr, frameTotal - total, nullptr, 0};
++    }
++
++    q->trimStart(4);
++    auto buf = q->split(frameLen);
++    return {std::move(buf), 0, nullptr, frameTotal};
++  }
++
++  std::unique_ptr<IOBuf> addFrame(
++      std::unique_ptr<IOBuf> buf, THeader*) override {
++    return buf;
++  }
++
++  uint16_t getProtocolId() { return 0; }
++  CLIENT_TYPE getClientType() { return THRIFT_HEADER_CLIENT_TYPE; }
++};
++
++static std::unique_ptr<IOBuf> makeFramedMsg(size_t payloadSize) {
++  auto buf = IOBuf::create(4 + payloadSize);
++  uint32_t nbo = folly::Endian::big(uint32_t(payloadSize));
++  std::memcpy(buf->writableData(), &nbo, 4);
++  std::memset(buf->writableData() + 4, 'X', payloadSize);
++  buf->append(4 + payloadSize);
++  return buf;
++}
++
++static std::unique_ptr<IOBuf> makePartialFramedMsg(
++    size_t declaredPayloadSize, size_t availablePayloadSize, size_t capacity) {
++  auto buf = IOBuf::create(capacity);
++  uint32_t nbo = folly::Endian::big(uint32_t(declaredPayloadSize));
++  std::memcpy(buf->writableData(), &nbo, 4);
++  std::memset(buf->writableData() + 4, 'X', availablePayloadSize);
++  buf->append(4 + availablePayloadSize);
++  return buf;
++}
++
++static auto makeReadPipeline(
++    const std::shared_ptr<MockFramingHandler>& mockHandler,
++    const std::shared_ptr<RecordingHandler>& recorder) {
++  auto pipeline =
++      wangle::Pipeline<IOBufQueue&, std::unique_ptr<IOBuf>>::create();
++  pipeline->addBack(mockHandler);
++  pipeline->addBack(recorder);
++  pipeline->finalize();
++  return pipeline;
++}
++
++TEST(FramingHandlerReadTest, ReadWithFullFrame) {
++  auto mockHandler = std::make_shared<MockFramingHandler>();
++  auto recorder = std::make_shared<RecordingHandler>();
++  auto pipeline =
++      wangle::Pipeline<IOBufQueue&, std::unique_ptr<IOBuf>>::create();
++  pipeline->addBack(mockHandler);
++  pipeline->addBack(recorder);
++  pipeline->finalize();
++
++  IOBufQueue q;
++  q.append(makeFramedMsg(100));
++  pipeline->read(q);
++  EXPECT_EQ(1u, recorder->frameLengths.size());
++  EXPECT_EQ(100u, recorder->frameLengths[0]);
++  auto [readSize, allocationSize] = pipeline->getReadBufferSettings();
++  EXPECT_EQ(2048u, readSize);
++  EXPECT_EQ(2048u, allocationSize);
++}
++
++TEST(FramingHandlerReadTest, ReadWithPartialFrame) {
++  auto mockHandler = std::make_shared<MockFramingHandler>();
++  auto recorder = std::make_shared<RecordingHandler>();
++  auto pipeline =
++      wangle::Pipeline<IOBufQueue&, std::unique_ptr<IOBuf>>::create();
++  pipeline->addBack(mockHandler);
++  pipeline->addBack(recorder);
++  pipeline->finalize();
++
++  // Feed only 2 bytes of a 4-byte frame header — triggers partial frame path
++  IOBufQueue q;
++  auto partial = IOBuf::create(2);
++  uint32_t nbo = folly::Endian::big(uint32_t(100));
++  std::memcpy(partial->writableData(), &nbo, 2);
++  partial->append(2);
++  q.append(std::move(partial));
++  pipeline->read(q);
++  EXPECT_EQ(0u, recorder->frameLengths.size()); // no full frame received
++  auto [readSize, allocationSize] = pipeline->getReadBufferSettings();
++  EXPECT_EQ(2048u, readSize);
++  EXPECT_EQ(2u, allocationSize);
++}
++
++TEST(FramingHandlerReadTest, ReadMultipleFramesEMA) {
++  auto mockHandler = std::make_shared<MockFramingHandler>();
++  auto recorder = std::make_shared<RecordingHandler>();
++  auto pipeline =
++      wangle::Pipeline<IOBufQueue&, std::unique_ptr<IOBuf>>::create();
++  pipeline->addBack(mockHandler);
++  pipeline->addBack(recorder);
++  pipeline->finalize();
++
++  // Feed 3 frames of different sizes in one queue — triggers EMA sliding window
++  IOBufQueue q;
++  q.append(makeFramedMsg(4000));
++  q.append(makeFramedMsg(8000));
++  q.append(makeFramedMsg(2000));
++  pipeline->read(q);
++  EXPECT_EQ(3u, recorder->frameLengths.size());
++  EXPECT_EQ(4000u, recorder->frameLengths[0]);
++  EXPECT_EQ(8000u, recorder->frameLengths[1]);
++  EXPECT_EQ(2000u, recorder->frameLengths[2]);
++  // EMA frame lengths: 4004 -> 4404 -> 4164; read size = 4164 * 16.
++  auto [readSize, allocationSize] = pipeline->getReadBufferSettings();
++  EXPECT_EQ(66624u, readSize);
++  EXPECT_EQ(66624u, allocationSize);
++}
++
++TEST(FramingHandlerReadTest, StrictReadBufferSize) {
++  auto mockHandler = std::make_shared<MockFramingHandler>();
++  auto recorder = std::make_shared<RecordingHandler>();
++  auto pipeline = makeReadPipeline(mockHandler, recorder);
++  mockHandler->setReadBufferSize(1234, true);
++
++  IOBufQueue q;
++  pipeline->read(q);
++  auto [readSize, allocationSize] = pipeline->getReadBufferSettings();
++  EXPECT_EQ(1234u, readSize);
++  EXPECT_EQ(1234u, allocationSize);
++}
++
++TEST(FramingHandlerReadTest, AdaptiveIntermediateReadBufferSize) {
++  auto mockHandler = std::make_shared<MockFramingHandler>();
++  auto recorder = std::make_shared<RecordingHandler>();
++  auto pipeline = makeReadPipeline(mockHandler, recorder);
++
++  IOBufQueue q;
++  q.append(makeFramedMsg(4000));
++  pipeline->read(q);
++  auto [readSize, allocationSize] = pipeline->getReadBufferSettings();
++  EXPECT_EQ((4000u + 4u) * 16u, readSize);
++  EXPECT_EQ(readSize, allocationSize);
++}
++
++TEST(FramingHandlerReadTest, AdaptiveReadBufferSizeClampedToMaximum) {
++  auto mockHandler = std::make_shared<MockFramingHandler>();
++  auto recorder = std::make_shared<RecordingHandler>();
++  auto pipeline = makeReadPipeline(mockHandler, recorder);
++
++  IOBufQueue q;
++  q.append(makeFramedMsg(40000));
++  pipeline->read(q);
++  auto [readSize, allocationSize] = pipeline->getReadBufferSettings();
++  EXPECT_EQ(524288u, readSize);
++  EXPECT_EQ(524288u, allocationSize);
++}
++
++TEST(FramingHandlerReadTest, PartialBodyUsesRemainingBytes) {
++  auto mockHandler = std::make_shared<MockFramingHandler>();
++  auto recorder = std::make_shared<RecordingHandler>();
++  auto pipeline = makeReadPipeline(mockHandler, recorder);
++
++  IOBufQueue q;
++  q.append(makePartialFramedMsg(100, 10, 14));
++  pipeline->read(q);
++  auto [readSize, allocationSize] = pipeline->getReadBufferSettings();
++  EXPECT_EQ(2048u, readSize);
++  EXPECT_EQ(90u, allocationSize);
++}
++
++TEST(FramingHandlerReadTest, PartialBodyUsesLargerTailroom) {
++  auto mockHandler = std::make_shared<MockFramingHandler>();
++  auto recorder = std::make_shared<RecordingHandler>();
++  auto pipeline = makeReadPipeline(mockHandler, recorder);
++
++  IOBufQueue q;
++  q.append(makePartialFramedMsg(100, 10, 256));
++  ASSERT_EQ(242u, q.tailroom());
++  pipeline->read(q);
++  auto [readSize, allocationSize] = pipeline->getReadBufferSettings();
++  EXPECT_EQ(2048u, readSize);
++  EXPECT_EQ(242u, allocationSize);
++}
++
++TEST(FramingHandlerReadTest, ZeroLengthFrameKeepsMinimumReadBuffer) {
++  auto mockHandler = std::make_shared<MockFramingHandler>();
++  auto recorder = std::make_shared<RecordingHandler>();
++  auto pipeline = makeReadPipeline(mockHandler, recorder);
++  mockHandler->emitZeroLengthFrame = true;
++
++  IOBufQueue q;
++  pipeline->read(q);
++  ASSERT_EQ(1u, recorder->frameLengths.size());
++  EXPECT_EQ(0u, recorder->frameLengths[0]);
++  auto [readSize, allocationSize] = pipeline->getReadBufferSettings();
++  EXPECT_EQ(2048u, readSize);
++  EXPECT_EQ(2048u, allocationSize);
++}
++
++TEST(FramingHandlerReadTest, RemoveFrameExceptionIsForwardedAndCloses) {
++  auto closeRecorder = std::make_shared<CloseRecordingHandler>();
++  auto mockHandler = std::make_shared<MockFramingHandler>();
++  auto recorder = std::make_shared<RecordingHandler>();
++  auto pipeline =
++      wangle::Pipeline<IOBufQueue&, std::unique_ptr<IOBuf>>::create();
++  pipeline->addBack(closeRecorder);
++  pipeline->addBack(mockHandler);
++  pipeline->addBack(recorder);
++  pipeline->finalize();
++  mockHandler->throwOnRemove = true;
++
++  IOBufQueue q;
++  q.append(makeFramedMsg(100));
++  pipeline->read(q);
++  EXPECT_EQ(1u, recorder->exceptionCount);
++  EXPECT_EQ(1u, closeRecorder->closeCount);
++  EXPECT_TRUE(recorder->frameLengths.empty());
++}
++
++TEST(FramingHandlerWriteTest, AddedFrameIsForwardedToTransport) {
++  auto transportRecorder = std::make_shared<CloseRecordingHandler>();
++  auto mockHandler = std::make_shared<MockFramingHandler>();
++  auto recorder = std::make_shared<RecordingHandler>();
++  auto pipeline =
++      wangle::Pipeline<IOBufQueue&, std::unique_ptr<IOBuf>>::create();
++  pipeline->addBack(transportRecorder);
++  pipeline->addBack(mockHandler);
++  pipeline->addBack(recorder);
++  pipeline->finalize();
++
++  auto message = makeFramedMsg(123);
++  const auto expectedLength = message->computeChainDataLength();
++  pipeline->write(std::move(message)).get();
++
++  ASSERT_EQ(1u, transportRecorder->writtenLengths.size());
++  EXPECT_EQ(expectedLength, transportRecorder->writtenLengths[0]);
++}
++
++int main(int argc, char** argv) {
++  folly::InitOptions opts;
++  opts.use_gflags = false;
++  folly::init(&argc, &argv, opts);
++  testing::InitGoogleTest(&argc, argv);
++  return RUN_ALL_TESTS();
++}
+diff --git a/thrift/lib/cpp2/op/detail/Encode.h b/thrift/lib/cpp2/op/detail/Encode.h
+index 9535af84bfeda44aace6868154236419e68657b6..ca416280c7d75f9abf1366869ffe2417c18b9430 100644
+--- a/thrift/lib/cpp2/op/detail/Encode.h
++++ b/thrift/lib/cpp2/op/detail/Encode.h
+@@ -453,19 +453,55 @@ struct Encode<type::enum_t<T>> {
+   }
+ };
+ 
+-// TODO: add optimization used in protocol_methods.h
++// Map an integral Tag to its native C++ element type for the batched
++// varint-list fast path below.
++template <typename Tag>
++struct batched_int_list_elem {
++  using type = void;
++};
++template <>
++struct batched_int_list_elem<type::i16_t> {
++  using type = std::int16_t;
++};
++template <>
++struct batched_int_list_elem<type::i32_t> {
++  using type = std::int32_t;
++};
++template <>
++struct batched_int_list_elem<type::i64_t> {
++  using type = std::int64_t;
++};
++
+ template <typename Tag>
+ struct Encode<type::list<Tag>> {
+   template <typename Protocol, typename T>
+   uint32_t operator()(Protocol& prot, const T& list) const {
+-    uint32_t xfer = 0;
+-    xfer += prot.writeListBegin(
+-        typeTagToTType<Tag>, checked_container_size(list.size()));
+-    for (const auto& elem : list) {
+-      xfer += Encode<Tag>{}(prot, elem);
++    using ElemT = typename batched_int_list_elem<Tag>::type;
++    // Fast path: list<i16|i32|i64> in a contiguous container (vector-like),
++    // on a protocol that exposes writeI{N}List (currently
++    // CompactProtocolWriter). Emits identical bytes to the per-element loop.
++    if constexpr (
++        !std::is_void_v<ElemT> &&
++        apache::thrift::detail::pm::
++            can_batch_int_list_write_v<Protocol, T, ElemT>) {
++      const uint32_t size = checked_container_size(list.size());
++      if constexpr (std::is_same_v<ElemT, std::int16_t>) {
++        return prot.writeI16List(list.data(), size);
++      } else if constexpr (std::is_same_v<ElemT, std::int32_t>) {
++        return prot.writeI32List(list.data(), size);
++      } else {
++        return prot.writeI64List(list.data(), size);
++      }
++    } else {
++      uint32_t xfer = 0;
++      xfer += prot.writeListBegin(
++          typeTagToTType<Tag>, checked_container_size(list.size()));
++      for (const auto& elem : list) {
++        xfer += Encode<Tag>{}(prot, elem);
++      }
++      xfer += prot.writeListEnd();
++      return xfer;
+     }
+-    xfer += prot.writeListEnd();
+-    return xfer;
+   }
+ };
+ 
+@@ -637,7 +673,6 @@ struct Decode<type::enum_t<T>> {
+   }
+ };
+ 
+-// TODO: add optimization used in protocol_methods.h
+ template <typename Tag>
+ struct Decode<type::list<Tag>> {
+   template <typename Protocol, typename ListType>
+@@ -645,11 +680,33 @@ struct Decode<type::list<Tag>> {
+     TType t;
+     uint32_t s;
+     prot.readListBegin(t, s);
+-    apache::thrift::detail::pm::reserve_if_possible(&list, s);
+     if (typeTagToTType<Tag> == t) {
+-      while (s--) {
+-        auto&& elem = apache::thrift::detail::pm::emplace_back_default(list);
+-        Decode<Tag>{}(prot, elem);
++      // Fast path mirrors protocol_methods.h: list<i16|i32|i64> in a
++      // contiguous resizable container (vector-like) on a reader that
++      // exposes readI{N}List (currently BinaryProtocolReader). Wire bytes
++      // are unchanged.
++      using ElemT = typename ListType::value_type;
++      if constexpr (
++          (std::is_same_v<ElemT, std::int16_t> ||
++           std::is_same_v<ElemT, std::int32_t> ||
++           std::is_same_v<ElemT, std::int64_t>) &&
++          apache::thrift::detail::pm::
++              can_batch_int_list_read_v<Protocol, ListType, ElemT>) {
++        const std::size_t old_size = list.size();
++        list.resize(old_size + s);
++        if constexpr (std::is_same_v<ElemT, std::int16_t>) {
++          prot.readI16List(list.data() + old_size, s);
++        } else if constexpr (std::is_same_v<ElemT, std::int32_t>) {
++          prot.readI32List(list.data() + old_size, s);
++        } else {
++          prot.readI64List(list.data() + old_size, s);
++        }
++      } else {
++        apache::thrift::detail::pm::reserve_if_possible(&list, s);
++        while (s--) {
++          auto&& elem = apache::thrift::detail::pm::emplace_back_default(list);
++          Decode<Tag>{}(prot, elem);
++        }
+       }
+     } else {
+       while (s--) {
+diff --git a/thrift/lib/cpp2/protocol/BinaryProtocol-inl.h b/thrift/lib/cpp2/protocol/BinaryProtocol-inl.h
+index 32a70240d592da52b82fdd29a8c7be97e47658a8..8f02105c0f28de071bf8a2593b7fcbae594de758 100644
+--- a/thrift/lib/cpp2/protocol/BinaryProtocol-inl.h
++++ b/thrift/lib/cpp2/protocol/BinaryProtocol-inl.h
+@@ -17,8 +17,10 @@
+ #ifndef THRIFT2_PROTOCOL_TBINARYPROTOCOL_TCC_
+ #define THRIFT2_PROTOCOL_TBINARYPROTOCOL_TCC_ 1
+ 
++#include <cstring>
+ #include <limits>
+ #include <string>
++#include <type_traits>
+ 
+ namespace apache {
+ namespace thrift {
+@@ -138,6 +140,61 @@ inline uint32_t BinaryProtocolWriter::writeI64(int64_t i64) {
+   return sizeof(i64);
+ }
+ 
++namespace detail {
++// One-shot reserve + tight bswap+store loop. Compared to the per-element
++// `out_.writeBE(value)` path, this removes:
++//   - N redundant `ensure()` tailroom-check branches inside QueueAppender,
++//   - N `append()` cursor advances (collapsed into one),
++// and exposes a trivially vectorizable inner loop to the compiler (NEON
++// `vrev32q + vst1q` on aarch64, `pshufb + movdqu` on x86 with -O2/-O3).
++//
++// Wire bytes are byte-for-byte identical to the per-element path.
++template <class T>
++FOLLY_ALWAYS_INLINE void writeBeContiguous(
++    folly::io::QueueAppender& out, const T* data, uint32_t size) {
++  static_assert(std::is_integral<T>::value, "T must be integral");
++  if (size == 0) {
++    return;
++  }
++  const size_t total = static_cast<size_t>(size) * sizeof(T);
++  out.ensure(total);
++  uint8_t* dst = out.writableData();
++  for (uint32_t i = 0; i < size; ++i) {
++    const T be = folly::Endian::big(data[i]);
++    std::memcpy(dst, &be, sizeof(T));
++    dst += sizeof(T);
++  }
++  out.append(total);
++}
++} // namespace detail
++
++inline uint32_t BinaryProtocolWriter::writeI16List(
++    const int16_t* data, uint32_t size) {
++  uint32_t xfer = writeListBegin(TType::T_I16, size);
++  detail::writeBeContiguous(out_, data, size);
++  xfer += static_cast<uint32_t>(size) * sizeof(int16_t);
++  xfer += writeListEnd();
++  return xfer;
++}
++
++inline uint32_t BinaryProtocolWriter::writeI32List(
++    const int32_t* data, uint32_t size) {
++  uint32_t xfer = writeListBegin(TType::T_I32, size);
++  detail::writeBeContiguous(out_, data, size);
++  xfer += static_cast<uint32_t>(size) * sizeof(int32_t);
++  xfer += writeListEnd();
++  return xfer;
++}
++
++inline uint32_t BinaryProtocolWriter::writeI64List(
++    const int64_t* data, uint32_t size) {
++  uint32_t xfer = writeListBegin(TType::T_I64, size);
++  detail::writeBeContiguous(out_, data, size);
++  xfer += static_cast<uint32_t>(size) * sizeof(int64_t);
++  xfer += writeListEnd();
++  return xfer;
++}
++
+ inline uint32_t BinaryProtocolWriter::writeDouble(double dub) {
+   static_assert(sizeof(double) == sizeof(uint64_t), "");
+   static_assert(std::numeric_limits<double>::is_iec559, "");
+@@ -501,6 +558,42 @@ inline void BinaryProtocolReader::readI64(int64_t& i64) {
+   i64 = in_.readBE<int64_t>();
+ }
+ 
++namespace detail {
++// Symmetric to writeBeContiguous: one bulk pull from the cursor + an
++// in-place bswap loop that the compiler auto-vectorizes (NEON `vrev32q`,
++// SSSE3 `pshufb`). Removes the per-element `ensure()` branch hidden inside
++// Cursor::readBE and lets the destination buffer be filled in a single
++// straight-line memory pass.
++template <class T>
++FOLLY_ALWAYS_INLINE void readBeContiguous(
++    folly::io::Cursor& in, T* data, uint32_t size) {
++  static_assert(std::is_integral<T>::value, "T must be integral");
++  if (size == 0) {
++    return;
++  }
++  const size_t total = static_cast<size_t>(size) * sizeof(T);
++  // Pull throws on truncated input, matching the per-element readBE
++  // behavior. canReadNElements has already been validated by the caller in
++  // the typical generated-code path, so this is just a fast bulk copy.
++  in.pull(data, total);
++  for (uint32_t i = 0; i < size; ++i) {
++    data[i] = folly::Endian::big(data[i]);
++  }
++}
++} // namespace detail
++
++inline void BinaryProtocolReader::readI16List(int16_t* data, uint32_t size) {
++  detail::readBeContiguous(in_, data, size);
++}
++
++inline void BinaryProtocolReader::readI32List(int32_t* data, uint32_t size) {
++  detail::readBeContiguous(in_, data, size);
++}
++
++inline void BinaryProtocolReader::readI64List(int64_t* data, uint32_t size) {
++  detail::readBeContiguous(in_, data, size);
++}
++
+ inline void BinaryProtocolReader::readDouble(double& dub) {
+   static_assert(sizeof(double) == sizeof(uint64_t), "");
+   static_assert(std::numeric_limits<double>::is_iec559, "");
+diff --git a/thrift/lib/cpp2/protocol/BinaryProtocol.h b/thrift/lib/cpp2/protocol/BinaryProtocol.h
+index f006672e0203d2f3b443accfeb5ddfcef90a13f0..dfec88e43059c685d2c2267c78a95fe3d3092cdd 100644
+--- a/thrift/lib/cpp2/protocol/BinaryProtocol.h
++++ b/thrift/lib/cpp2/protocol/BinaryProtocol.h
+@@ -101,6 +101,16 @@ class BinaryProtocolWriter : public detail::ProtocolBase {
+   uint32_t writeI16(int16_t i16);
+   uint32_t writeI32(int32_t i32);
+   uint32_t writeI64(int64_t i64);
++  // Batched fixed-width list writers. They emit byte-for-byte the same wire
++  // bytes as `writeListBegin + N x writeI{N} + writeListEnd`, but with a
++  // single `ensure(N * sizeof(T))` and a tight inner loop, which (a) removes
++  // the per-element tailroom-check branch from QueueAppender::writeBE and
++  // (b) gives the compiler an obvious vectorizable bswap loop. The fast path
++  // is automatically picked up by the SFINAE trait in
++  // detail/protocol_methods.h whenever the container is contiguous.
++  uint32_t writeI16List(const int16_t* data, uint32_t size);
++  uint32_t writeI32List(const int32_t* data, uint32_t size);
++  uint32_t writeI64List(const int64_t* data, uint32_t size);
+   uint32_t writeDouble(double dub);
+   uint32_t writeFloat(float flt);
+   uint32_t writeString(folly::StringPiece str);
+@@ -247,6 +257,18 @@ class BinaryProtocolReader : public detail::ProtocolBase {
+   void readI16(int16_t& i16);
+   void readI32(int32_t& i32);
+   void readI64(int64_t& i64);
++  // Batched fixed-width list readers. Symmetric to writeI{N}List on the
++  // writer side. Pulls `size * sizeof(T)` raw big-endian bytes from the
++  // cursor in a single call (handling IOBuf-chain crossings internally),
++  // then performs an in-place bswap loop that the compiler auto-vectorizes
++  // (NEON `vrev32q` on aarch64, `pshufb` on x86 with SSSE3+). Wire bytes
++  // are byte-for-byte equivalent to looping `readI{N}` per element. The
++  // fast path is opted into automatically by the SFINAE trait in
++  // detail/protocol_methods.h whenever the destination container is
++  // contiguous and resizable.
++  void readI16List(int16_t* data, uint32_t size);
++  void readI32List(int32_t* data, uint32_t size);
++  void readI64List(int64_t* data, uint32_t size);
+   void readDouble(double& dub);
+   void readFloat(float& flt);
+   template <typename StrType>
+diff --git a/thrift/lib/cpp2/protocol/CompactProtocol-inl.h b/thrift/lib/cpp2/protocol/CompactProtocol-inl.h
+index af57ea5217deea150d139b0f86f201d0769c3172..7d853d43a32d3c1a7ef280f1f805c341808b5280 100644
+--- a/thrift/lib/cpp2/protocol/CompactProtocol-inl.h
++++ b/thrift/lib/cpp2/protocol/CompactProtocol-inl.h
+@@ -17,9 +17,21 @@
+ #ifndef THRIFT2_PROTOCOL_COMPACTPROTOCOL_TCC_
+ #define THRIFT2_PROTOCOL_COMPACTPROTOCOL_TCC_ 1
+ 
++#include <cstring>
+ #include <limits>
+ 
+ #include <thrift/lib/cpp/util/VarintUtils.h>
++#include <thrift/lib/cpp2/protocol/detail/CompactProtocolSveDispatch.h>
++
++// The SVE2 accelerated varint-list encoders live in CompactProtocolSve.cpp,
++// which is the *only* translation unit that is compiled with
++// `-march=armv8-a+sve2+sve-bitperm` (controlled by the CMake option
++// THRIFT_ENABLE_ARM_SVE2). Downstream consumers (benchmarks, services, etc.)
++// do NOT need any special compile flag: writeI{16,32,64}List below simply
++// calls the runtime-dispatched entry points declared in
++// CompactProtocolSveDispatch.h, which cache a single
++// `detectRuntimeSve2()` check and either route to the SVE2 kernel or to the
++// scalar encoder. The emitted wire bytes are identical in both cases.
+ 
+ namespace apache {
+ namespace thrift {
+@@ -287,6 +299,45 @@ inline uint32_t CompactProtocolWriter::writeI64(int64_t i64) {
+       out_, apache::thrift::util::i64ToZigzag(i64));
+ }
+ 
++// The SVE2-accelerated batched varint encoders for 32-bit and 64-bit elements
++// have been relocated to thrift/lib/cpp2/protocol/CompactProtocolSve.cpp. The
++// runtime-dispatched entry points declared in CompactProtocolSveDispatch.h
++// (dispatchVarintEncode32 / dispatchVarintEncode64) cache a single CPU-
++// capability probe and route to the SVE2 kernel or to a scalar encoder. This
++// way the `-march=armv8-a+sve2+sve-bitperm` flag only needs to be applied to
++// that single TU inside the fbthrift build, and downstream consumers do NOT
++// need any special compile flags at all.
++inline uint32_t CompactProtocolWriter::writeI16List(
++    const int16_t* data, uint32_t size) {
++  // There is no dedicated 16-bit SVE kernel; fall back to the original
++  // per-element path for all builds. This keeps the emitted bytes identical
++  // to writeI16 in a loop.
++  uint32_t xfer = writeListBegin(TType::T_I16, size);
++  for (uint32_t i = 0; i < size; ++i) {
++    xfer += writeI16(data[i]);
++  }
++  xfer += writeListEnd();
++  return xfer;
++}
++
++inline uint32_t CompactProtocolWriter::writeI32List(
++    const int32_t* data, uint32_t size) {
++  uint32_t xfer = writeListBegin(TType::T_I32, size);
++  xfer += ::apache::thrift::detail::compact::dispatchVarintEncode32(
++      data, size, out_);
++  xfer += writeListEnd();
++  return xfer;
++}
++
++inline uint32_t CompactProtocolWriter::writeI64List(
++    const int64_t* data, uint32_t size) {
++  uint32_t xfer = writeListBegin(TType::T_I64, size);
++  xfer += ::apache::thrift::detail::compact::dispatchVarintEncode64(
++      data, size, out_);
++  xfer += writeListEnd();
++  return xfer;
++}
++
+ inline uint32_t CompactProtocolWriter::writeDouble(double dub) {
+   static_assert(sizeof(double) == sizeof(uint64_t), "");
+   static_assert(std::numeric_limits<double>::is_iec559, "");
+diff --git a/thrift/lib/cpp2/protocol/CompactProtocol.h b/thrift/lib/cpp2/protocol/CompactProtocol.h
+index 54e9487e203cce4d9a29fecb8791438acbdbf6e8..4c643325584a60bd8e2dd44c83fc76430a71351d 100644
+--- a/thrift/lib/cpp2/protocol/CompactProtocol.h
++++ b/thrift/lib/cpp2/protocol/CompactProtocol.h
+@@ -127,6 +127,23 @@ class CompactProtocolWriter : public detail::ProtocolBase {
+   uint32_t writeBinary(const IOBuf& str);
+   uint32_t writeRaw(const IOBuf& buf);
+ 
++  /**
++   * Batched varint list writers.
++   *
++   * These emit exactly the same bytes as:
++   *   writeListBegin(T_I{16,32,64}, size);
++   *   for (i : 0..size) writeI{16,32,64}(data[i]);
++   *   writeListEnd();
++   * so the reader side does not need any changes.
++   *
++   * The advantage is fewer per-element function calls / buffer growth checks:
++   * we pre-reserve an upper-bound of bytes in the output buffer and then run
++   * a tight varint-encoding loop.
++   */
++  inline uint32_t writeI16List(const int16_t* data, uint32_t size);
++  inline uint32_t writeI32List(const int32_t* data, uint32_t size);
++  inline uint32_t writeI64List(const int64_t* data, uint32_t size);
++
+   /**
+    * Functions that return the serialized size
+    *
+diff --git a/thrift/lib/cpp2/protocol/CompactProtocolSve.cpp b/thrift/lib/cpp2/protocol/CompactProtocolSve.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..7d91d94ab7194276ba6b0d3e50a389ea4661b943
+--- /dev/null
++++ b/thrift/lib/cpp2/protocol/CompactProtocolSve.cpp
+@@ -0,0 +1,400 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++// This translation unit is the ONLY place in fbthrift that should be compiled
++// with `-march=armv8-a+sve2+sve-bitperm`. The SVE2 kernels are exposed through
++// the dispatch functions declared in CompactProtocolSveDispatch.h; every other
++// TU (including downstream consumers like benchmarks) keeps its default
++// compile flags and reaches SVE2 solely through these exported symbols.
++//
++// The CMake build sets THRIFT_HAS_ARM_SVE2 only when the user opts in via
++// -DTHRIFT_ENABLE_ARM_SVE2=ON. When it is not set, this file compiles a
++// scalar-only fallback with zero additional requirements.
++
++#include <thrift/lib/cpp2/protocol/detail/CompactProtocolSveDispatch.h>
++
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <type_traits>
++
++#include <folly/io/Cursor.h>
++
++#include <thrift/lib/cpp/util/VarintUtils.h>
++
++#if defined(THRIFT_HAS_ARM_SVE2)
++#include <arm_sve.h>
++#if defined(__linux__)
++#include <sys/auxv.h>
++#ifndef HWCAP2_SVE2
++#define HWCAP2_SVE2 (1UL << 1)
++#endif
++#ifndef HWCAP2_SVEBITPERM
++#define HWCAP2_SVEBITPERM (1UL << 4)
++#endif
++#endif // __linux__
++#endif // THRIFT_HAS_ARM_SVE2
++
++namespace apache {
++namespace thrift {
++namespace detail {
++namespace compact {
++
++namespace {
++
++// Scalar fallback. Same bytes and call pattern as the inline per-element
++// path, so this produces no regression vs. pre-patch codegen.
++uint32_t varintEncodeScalar32(
++    const int32_t* data, uint32_t size, folly::io::QueueAppender& out) {
++  uint32_t xfer = 0;
++  for (uint32_t i = 0; i < size; ++i) {
++    xfer += apache::thrift::util::writeVarint(
++        out, apache::thrift::util::i32ToZigzag(data[i]));
++  }
++  return xfer;
++}
++
++uint32_t varintEncodeScalar64(
++    const int64_t* data, uint32_t size, folly::io::QueueAppender& out) {
++  uint32_t xfer = 0;
++  for (uint32_t i = 0; i < size; ++i) {
++    xfer += apache::thrift::util::writeVarint(
++        out, apache::thrift::util::i64ToZigzag(data[i]));
++  }
++  return xfer;
++}
++
++#if defined(THRIFT_HAS_ARM_SVE2)
++
++// ---------------------------------------------------------------------------
++// SVE2 + SVE-BitPerm kernels. Ported from the protobuf implementation, but
++// adapted for folly::io::QueueAppender (we reserve an upper bound per batch,
++// write directly to the raw writable bytes, and commit the exact used size
++// via out.append()).
++//
++// Both kernels assume VL == 256 bits (svcntw() == 8 / svcntd() == 4). The
++// runtime check below guarantees they are never entered on a mismatched VL.
++// ---------------------------------------------------------------------------
++
++template <class T>
++uint32_t varintEncode32SveKernel(
++    const T* loc, uint32_t size, folly::io::QueueAppender& out) {
++  static_assert(
++      std::is_same<T, int32_t>::value || std::is_same<T, uint32_t>::value,
++      "T must be int32_t or uint32_t");
++
++  uint32_t written = 0;
++  svbool_t pt = svptrue_b8();
++  svuint32_t dep_mask = svdup_u32(0x7F7F7F7Fu);
++  alignas(16) static const uint32_t TAG_TABLE[8] = {
++      0u, 0u, 0x80u, 0x8080u, 0x808080u, 0x80808080u, 0u, 0u};
++  alignas(16) static const uint32_t EXT_TABLE[8] = {
++      0u, 0xFFu, 0xFFFFu, 0xFFFFFFu, 0xFFFFFFFFu, 0u, 0u, 0u};
++  svuint32_t tag_table = svld1(pt, TAG_TABLE);
++  svuint32_t ext_table = svld1(pt, EXT_TABLE);
++  svuint8_t fast_index = svindex_u8(0, 4);
++  const uint32_t* data = reinterpret_cast<const uint32_t*>(loc);
++
++  // Per batch we reserve an upper bound of 8 * 5 = 40 bytes, plus 8 bytes of
++  // slack for the trailing 8-byte store of the packed single-byte fast path.
++  constexpr size_t kBatchReserve = 8 * 5 + 8;
++
++  uint32_t i = 0;
++  for (; i + 8 <= size; i += 8) {
++    out.ensure(kBatchReserve);
++    uint8_t* const batch_start = out.writableData();
++    uint8_t* ptr = batch_start;
++
++    svuint32_t origin_value = svld1(pt, data + i);
++    if (std::is_same<T, int32_t>::value) {
++      svint32_t v_s = svreinterpret_s32_u32(origin_value);
++      svuint32_t left = svlsl_n_u32_z(pt, origin_value, 1);
++      svint32_t sign = svasr_n_s32_z(pt, v_s, 31);
++      svuint32_t sign_u = svreinterpret_u32_s32(sign);
++      origin_value = sveor_u32_z(pt, left, sign_u);
++    }
++
++    svbool_t p1 = svcmpgt_n_u32(pt, origin_value, 0x7Fu);
++    if (!svptest_any(pt, p1)) {
++      // All-single-byte fast path: emit exactly 8 bytes.
++      svuint8_t fast_data = svreinterpret_u8_u32(origin_value);
++      svuint8_t fast_lookup = svtbl(fast_data, fast_index);
++      svuint64_t fast_result = svreinterpret_u64_u8(fast_lookup);
++      svst1(
++          svwhilelt_b64(0u, 1u),
++          reinterpret_cast<uint64_t*>(ptr),
++          fast_result);
++      ptr += 8;
++      const size_t used = static_cast<size_t>(ptr - batch_start);
++      out.append(used);
++      written += static_cast<uint32_t>(used);
++      continue;
++    }
++
++    svuint32_t data_value = svbdep(origin_value, dep_mask);
++    svuint32_t cnt_val = svorr_n_u32_x(pt, data_value, 1);
++    svuint32_t lz_count = svclz_x(pt, cnt_val);
++    svuint32_t bits_count = svsubr_n_u32_x(pt, lz_count, 32 + 7);
++    svuint32_t byte_count = svlsr_n_u32_x(pt, bits_count, 3);
++
++    svbool_t p5 = svcmpgt_n_u32(pt, origin_value, 0xFFFFFFFu);
++    if (svptest_any(pt, p5)) {
++      uint32_t remain_buffer[8];
++      const uint32_t* remain_bits;
++      if (std::is_same<T, int32_t>::value) {
++        svst1(pt, remain_buffer, origin_value);
++        remain_bits = remain_buffer;
++      } else {
++        remain_bits = data + i;
++      }
++      byte_count = svsel(p5, svdup_n_u32(5), byte_count);
++      svuint32_t tag_value = svtbl(tag_table, byte_count);
++      svuint32_t sepint_value = svorr_x(pt, tag_value, data_value);
++      uint32_t val[8];
++      uint32_t len[8];
++      svst1(pt, len, byte_count);
++      svst1(pt, val, sepint_value);
++      for (int k = 0; k < 8; ++k) {
++        std::memcpy(ptr, &val[k], sizeof(uint32_t));
++        ptr += len[k];
++        if (len[k] == 5) {
++          *(ptr - 1) = static_cast<uint8_t>(remain_bits[k] >> 28);
++        }
++      }
++      const size_t used = static_cast<size_t>(ptr - batch_start);
++      out.append(used);
++      written += static_cast<uint32_t>(used);
++      continue;
++    }
++
++    // All elements fit in 1..4 bytes: pack two encoded varints per u64.
++    svuint32_t tag_value = svtbl(tag_table, byte_count);
++    svuint32_t sepint_value = svorr_x(pt, tag_value, data_value);
++    svuint64_t ext_mask = svreinterpret_u64_u32(svtbl(ext_table, byte_count));
++    svuint64_t merge_value = svreinterpret_u64_u32(sepint_value);
++    svuint64_t connect_value = svbext(merge_value, ext_mask);
++    svuint32_t add_pair = svaddp_x(pt, byte_count, svdup_n_u32(0));
++    svuint64_t pair_len = svreinterpret_u64_u32(add_pair);
++
++    uint64_t len[4];
++    svst1(pt, len, pair_len);
++    uint64_t val[4];
++    svst1(pt, val, connect_value);
++    for (int k = 0; k < 4; ++k) {
++      std::memcpy(ptr, &val[k], sizeof(uint64_t));
++      ptr += len[k];
++    }
++    const size_t used = static_cast<size_t>(ptr - batch_start);
++    out.append(used);
++    written += static_cast<uint32_t>(used);
++  }
++
++  // Scalar tail.
++  if (i < size) {
++    if (std::is_same<T, int32_t>::value) {
++      written += varintEncodeScalar32(
++          reinterpret_cast<const int32_t*>(loc + i), size - i, out);
++    } else {
++      for (; i < size; ++i) {
++        written += apache::thrift::util::writeVarint(out, loc[i]);
++      }
++    }
++  }
++  return written;
++}
++
++template <class T>
++uint32_t varintEncode64SveKernel(
++    const T* loc, uint32_t size, folly::io::QueueAppender& out) {
++  static_assert(
++      std::is_same<T, int64_t>::value || std::is_same<T, uint64_t>::value,
++      "T must be int64_t or uint64_t");
++
++  uint32_t written = 0;
++  svbool_t pt = svptrue_b8();
++  svuint64_t dep_mask = svdup_u64(0x7F7F7F7F7F7F7F7FULL);
++  alignas(16) static const uint64_t TAG_TABLE1[4] = {
++      0ULL, 0x80ULL, 0x8080ULL, 0x808080ULL};
++  alignas(16) static const uint64_t TAG_TABLE2[4] = {
++      0x80808080ULL,
++      0x8080808080ULL,
++      0x808080808080ULL,
++      0x80808080808080ULL};
++  svuint64_t tag_table1 = svld1(pt, TAG_TABLE1);
++  svuint64_t tag_table2 = svld1(pt, TAG_TABLE2);
++  svuint64x2_t tag_table = svcreate2_u64(tag_table1, tag_table2);
++  const uint64_t* data = reinterpret_cast<const uint64_t*>(loc);
++
++  constexpr size_t kBatchReserve = 4 * 10 + 8;
++
++  uint32_t i = 0;
++  for (; i + 4 <= size; i += 4) {
++    out.ensure(kBatchReserve);
++    uint8_t* const batch_start = out.writableData();
++    uint8_t* ptr = batch_start;
++
++    svuint64_t origin_value = svld1(pt, data + i);
++    if (std::is_same<T, int64_t>::value) {
++      svint64_t v_s = svreinterpret_s64_u64(origin_value);
++      svuint64_t left = svlsl_n_u64_z(pt, origin_value, 1);
++      svint64_t sign = svasr_n_s64_z(pt, v_s, 63);
++      svuint64_t sign_u = svreinterpret_u64_s64(sign);
++      origin_value = sveor_u64_z(pt, left, sign_u);
++    }
++
++    svbool_t p1 = svcmpgt_n_u64(pt, origin_value, 0x7FULL);
++    if (!svptest_any(pt, p1)) {
++      svuint8_t fast_index = svindex_u8(0, 8);
++      svuint8_t fast_data = svreinterpret_u8_u64(origin_value);
++      svuint8_t fast_lookup = svtbl(fast_data, fast_index);
++      svuint32_t fast_result = svreinterpret_u32_u8(fast_lookup);
++      svst1(
++          svwhilelt_b32(0u, 1u),
++          reinterpret_cast<uint32_t*>(ptr),
++          fast_result);
++      ptr += 4;
++      const size_t used = static_cast<size_t>(ptr - batch_start);
++      out.append(used);
++      written += static_cast<uint32_t>(used);
++      continue;
++    }
++
++    svuint64_t data_value = svbdep(origin_value, dep_mask);
++    svuint64_t cnt_val = svorr_n_u64_x(pt, data_value, 1);
++    svuint64_t lz_count = svclz_x(pt, cnt_val);
++    svuint64_t bits_count = svsubr_n_u64_x(pt, lz_count, 64 + 7 - 8);
++    svuint64_t byte_count = svlsr_n_u64_x(pt, bits_count, 3);
++
++    svbool_t p9 = svcmpgt_n_u64(pt, origin_value, 0xFFFFFFFFFFFFFFULL);
++    if (svptest_any(pt, p9)) {
++      uint64_t remain_buffer[4];
++      const uint64_t* remain_bits;
++      if (std::is_same<T, int64_t>::value) {
++        svst1(pt, remain_buffer, origin_value);
++        remain_bits = remain_buffer;
++      } else {
++        remain_bits = data + i;
++      }
++      svuint64_t tag_value = svtbl2(tag_table, byte_count);
++      svbool_t p10 = svcmpgt_n_u64(pt, origin_value, 0x7FFFFFFFFFFFFFFFULL);
++      byte_count = svadd_n_u64_m(pt, byte_count, 1);
++      byte_count = svsel(p9, svdup_n_u64(9), byte_count);
++      tag_value =
++          svsel(p9, svdup_n_u64(0x8080808080808080ULL), tag_value);
++      byte_count = svsel(p10, svdup_n_u64(10), byte_count);
++      svuint64_t encode_value = svorr_x(pt, tag_value, data_value);
++      uint64_t len[4];
++      uint64_t val[4];
++      svst1(pt, len, byte_count);
++      svst1(pt, val, encode_value);
++      for (int k = 0; k < 4; ++k) {
++        std::memcpy(ptr, &val[k], sizeof(uint64_t));
++        if (len[k] == 9) {
++          *(ptr + 8) = static_cast<uint8_t>(remain_bits[k] >> 56);
++        } else if (len[k] == 10) {
++          *(ptr + 8) = static_cast<uint8_t>(remain_bits[k] >> 56);
++          *(ptr + 9) = 1;
++        }
++        ptr += len[k];
++      }
++      const size_t used = static_cast<size_t>(ptr - batch_start);
++      out.append(used);
++      written += static_cast<uint32_t>(used);
++    } else {
++      svuint64_t tag_value = svtbl2(tag_table, byte_count);
++      byte_count = svadd_n_u64_m(pt, byte_count, 1);
++      svuint64_t encode_value = svorr_x(pt, tag_value, data_value);
++      uint64_t len[4];
++      uint64_t val[4];
++      svst1(pt, len, byte_count);
++      svst1(pt, val, encode_value);
++      for (int k = 0; k < 4; ++k) {
++        std::memcpy(ptr, &val[k], sizeof(uint64_t));
++        ptr += len[k];
++      }
++      const size_t used = static_cast<size_t>(ptr - batch_start);
++      out.append(used);
++      written += static_cast<uint32_t>(used);
++    }
++  }
++
++  // Scalar tail.
++  if (i < size) {
++    if (std::is_same<T, int64_t>::value) {
++      written += varintEncodeScalar64(
++          reinterpret_cast<const int64_t*>(loc + i), size - i, out);
++    } else {
++      for (; i < size; ++i) {
++        written += apache::thrift::util::writeVarint(out, loc[i]);
++      }
++    }
++  }
++  return written;
++}
++
++bool detectRuntimeSve2() {
++#if defined(__linux__)
++  unsigned long hwcap2 = ::getauxval(AT_HWCAP2);
++  if (!(hwcap2 & HWCAP2_SVE2)) {
++    return false;
++  }
++  if (!(hwcap2 & HWCAP2_SVEBITPERM)) {
++    return false;
++  }
++#endif
++  // VL must be exactly 256 bits (svcntw() == 8 / svcntd() == 4). The kernels
++  // are hand-tuned for this layout. If the VL does not match we fall back to
++  // the scalar encoder at runtime.
++  return svcntw() == 8u && svcntd() == 4u;
++}
++
++#endif // THRIFT_HAS_ARM_SVE2
++
++} // namespace
++
++bool hasRuntimeSve2() {
++#if defined(THRIFT_HAS_ARM_SVE2)
++  static const bool v = detectRuntimeSve2();
++  return v;
++#else
++  return false;
++#endif
++}
++
++uint32_t dispatchVarintEncode32(
++    const int32_t* data, uint32_t size, folly::io::QueueAppender& out) {
++#if defined(THRIFT_HAS_ARM_SVE2)
++  if (hasRuntimeSve2()) {
++    return varintEncode32SveKernel<int32_t>(data, size, out);
++  }
++#endif
++  return varintEncodeScalar32(data, size, out);
++}
++
++uint32_t dispatchVarintEncode64(
++    const int64_t* data, uint32_t size, folly::io::QueueAppender& out) {
++#if defined(THRIFT_HAS_ARM_SVE2)
++  if (hasRuntimeSve2()) {
++    return varintEncode64SveKernel<int64_t>(data, size, out);
++  }
++#endif
++  return varintEncodeScalar64(data, size, out);
++}
++
++} // namespace compact
++} // namespace detail
++} // namespace thrift
++} // namespace apache
+diff --git a/thrift/lib/cpp2/protocol/Cpp2Ops-inl.h b/thrift/lib/cpp2/protocol/Cpp2Ops-inl.h
+index f1e68d4e3f443a68720556f8ce789182ccf1eff6..b93d28af84a6620ae70915922ac728a3ff628587 100644
+--- a/thrift/lib/cpp2/protocol/Cpp2Ops-inl.h
++++ b/thrift/lib/cpp2/protocol/Cpp2Ops-inl.h
+@@ -494,6 +494,75 @@ void readIntoVector(Protocol* prot, std::vector<bool>& vec) {
+   }
+ }
+ 
++// Detect whether a protocol has writeI{16,32,64}List (currently only
++// CompactProtocolWriter does). Falls back to the per-element loop for any
++// protocol without a batched overload.
++template <class Protocol, class T, class = void>
++struct HasBatchedVarintListWriter : std::false_type {};
++
++template <class Protocol>
++struct HasBatchedVarintListWriter<
++    Protocol,
++    int16_t,
++    folly::void_t<decltype(std::declval<Protocol&>().writeI16List(
++        std::declval<const int16_t*>(), uint32_t{}))>> : std::true_type {};
++
++template <class Protocol>
++struct HasBatchedVarintListWriter<
++    Protocol,
++    int32_t,
++    folly::void_t<decltype(std::declval<Protocol&>().writeI32List(
++        std::declval<const int32_t*>(), uint32_t{}))>> : std::true_type {};
++
++template <class Protocol>
++struct HasBatchedVarintListWriter<
++    Protocol,
++    int64_t,
++    folly::void_t<decltype(std::declval<Protocol&>().writeI64List(
++        std::declval<const int64_t*>(), uint32_t{}))>> : std::true_type {};
++
++// Bulk-write a contiguous list of signed integers. Produces the exact same
++// wire bytes as the per-element path, so readers don't need any change.
++//
++// NOTE: Generated Thrift structs do NOT flow through Cpp2Ops<list<T>>::write
++// when serializing their fields; they go through either
++//   - thrift/lib/cpp2/protocol/detail/protocol_methods.h (legacy pm path), or
++//   - thrift/lib/cpp2/op/detail/Encode.h (new op::encode path),
++// both of which already dispatch to writeI{16,32,64}List automatically when
++// available. This helper is kept for the rare hand-written code that
++// explicitly uses Cpp2Ops to serialize a container.
++//
++// Usage (typically with a CompactProtocolWriter):
++//   apache::thrift::detail::writeVarintList(writer, myVecI32);
++template <class Protocol, class Vec>
++uint32_t writeVarintList(Protocol& prot, const Vec& vec) {
++  using T = typename Vec::value_type;
++  static_assert(
++      std::is_same<T, int16_t>::value || std::is_same<T, int32_t>::value ||
++          std::is_same<T, int64_t>::value,
++      "writeVarintList only supports vectors of int16_t / int32_t / int64_t");
++
++  const uint32_t size = folly::to_narrow(vec.size());
++
++  if constexpr (HasBatchedVarintListWriter<Protocol, T>::value) {
++    if constexpr (std::is_same<T, int16_t>::value) {
++      return prot.writeI16List(vec.data(), size);
++    } else if constexpr (std::is_same<T, int32_t>::value) {
++      return prot.writeI32List(vec.data(), size);
++    } else {
++      return prot.writeI64List(vec.data(), size);
++    }
++  } else {
++    // Fallback: same sequence as Cpp2Ops<list<T>>::write.
++    uint32_t xfer = prot.writeListBegin(Cpp2Ops<T>::thriftType(), size);
++    for (uint32_t i = 0; i < size; ++i) {
++      xfer += Cpp2Ops<T>::write(&prot, &vec[i]);
++    }
++    xfer += prot.writeListEnd();
++    return xfer;
++  }
++}
++
+ } // namespace detail
+ 
+ template <class L>
+diff --git a/thrift/lib/cpp2/protocol/detail/CompactProtocolSveDispatch.h b/thrift/lib/cpp2/protocol/detail/CompactProtocolSveDispatch.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..df9c56add24415c699df350be73f72f81403a994
+--- /dev/null
++++ b/thrift/lib/cpp2/protocol/detail/CompactProtocolSveDispatch.h
+@@ -0,0 +1,70 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <cstdint>
++
++namespace folly {
++namespace io {
++class QueueAppender;
++} // namespace io
++} // namespace folly
++
++namespace apache {
++namespace thrift {
++namespace detail {
++namespace compact {
++
++// -----------------------------------------------------------------------------
++// Runtime dispatched varint-list encoders.
++//
++// These functions live in CompactProtocolSve.cpp. When the library is built
++// with THRIFT_HAS_ARM_SVE2 (set by CMake when the THRIFT_ENABLE_ARM_SVE2
++// option is on), that single translation unit is compiled with
++// `-march=armv8-a+sve2+sve-bitperm` and contains the SVE2 kernels plus a
++// runtime CPU-capability check. All other translation units (including
++// downstream consumers like benchmarks/services) keep their default compile
++// flags and reach the SVE2 fast path purely through these function symbols.
++//
++// When THRIFT_HAS_ARM_SVE2 is off, these entry points fall back to the
++// scalar encoder - wire bytes are identical either way, and there is no
++// runtime overhead beyond a single cached bool check.
++// -----------------------------------------------------------------------------
++
++// Returns true iff the host CPU supports SVE2 + SVE-BitPerm with VL == 256
++// bits (svcntw() == 8, svcntd() == 4), and the library was built with SVE2
++// support enabled. Cached on first call.
++bool hasRuntimeSve2();
++
++// Encode `size` signed 32-bit integers as zigzag varints into `out`.
++// Produces exactly the same byte sequence as looping writeI32(data[i]).
++std::uint32_t dispatchVarintEncode32(
++    const std::int32_t* data,
++    std::uint32_t size,
++    folly::io::QueueAppender& out);
++
++// Encode `size` signed 64-bit integers as zigzag varints into `out`.
++// Produces exactly the same byte sequence as looping writeI64(data[i]).
++std::uint32_t dispatchVarintEncode64(
++    const std::int64_t* data,
++    std::uint32_t size,
++    folly::io::QueueAppender& out);
++
++} // namespace compact
++} // namespace detail
++} // namespace thrift
++} // namespace apache
+diff --git a/thrift/lib/cpp2/protocol/detail/protocol_methods.h b/thrift/lib/cpp2/protocol/detail/protocol_methods.h
+index 75e2f77f7b39023508a8e89cf120234ef00007f1..7601fb81da95b5ce26c4215a6993e6d3a4fd6146 100644
+--- a/thrift/lib/cpp2/protocol/detail/protocol_methods.h
++++ b/thrift/lib/cpp2/protocol/detail/protocol_methods.h
+@@ -497,6 +497,115 @@ struct protocol_methods<
+     std::enable_if_t<std::is_enum<Type>::value>> : enum_protocol_methods<Type> {
+ };
+ 
++// SFINAE helpers for dispatching list<i16/i32/i64> writes to a protocol's
++// batched varint list API (e.g. CompactProtocolWriter::writeI{16,32,64}List).
++// This keeps the wire format identical to the per-element loop below, so
++// readers don't need to change.
++template <class Protocol, class Elem, class = void>
++struct has_batched_int_list_writer : std::false_type {};
++
++template <class Protocol>
++struct has_batched_int_list_writer<
++    Protocol,
++    std::int16_t,
++    folly::void_t<decltype(std::declval<Protocol&>().writeI16List(
++        std::declval<const std::int16_t*>(), std::uint32_t{}))>>
++    : std::true_type {};
++
++template <class Protocol>
++struct has_batched_int_list_writer<
++    Protocol,
++    std::int32_t,
++    folly::void_t<decltype(std::declval<Protocol&>().writeI32List(
++        std::declval<const std::int32_t*>(), std::uint32_t{}))>>
++    : std::true_type {};
++
++template <class Protocol>
++struct has_batched_int_list_writer<
++    Protocol,
++    std::int64_t,
++    folly::void_t<decltype(std::declval<Protocol&>().writeI64List(
++        std::declval<const std::int64_t*>(), std::uint32_t{}))>>
++    : std::true_type {};
++
++template <class Container, class Elem, class = void>
++struct is_contiguous_elem_container : std::false_type {};
++
++template <class Container, class Elem>
++struct is_contiguous_elem_container<
++    Container,
++    Elem,
++    folly::void_t<
++        decltype(std::declval<const Container&>().data()),
++        decltype(std::declval<const Container&>().size())>>
++    : std::is_same<
++          const Elem*,
++          decltype(std::declval<const Container&>().data())> {};
++
++// Enable the batched list-write fast path whenever the writer exposes the
++// `writeI{N}List` API and the container is contiguous. The dispatcher in
++// CompactProtocolSve.cpp picks between an SVE2 kernel and a scalar fallback
++// at runtime, so downstream consumers never need to compile with any ARM
++// feature flag to reach the fast path. On x86 / non-SVE2 ARM the scalar
++// dispatcher produces the exact same bytes as the original per-element loop.
++template <class Protocol, class Container, class Elem>
++constexpr bool can_batch_int_list_write_v =
++    has_batched_int_list_writer<Protocol, Elem>::value &&
++    is_contiguous_elem_container<Container, Elem>::value;
++
++// SFINAE helpers for dispatching list<i16/i32/i64> reads to a protocol's
++// batched API (e.g. BinaryProtocolReader::readI{16,32,64}List). Symmetric
++// to has_batched_int_list_writer above. Wire bytes are unchanged.
++template <class Protocol, class Elem, class = void>
++struct has_batched_int_list_reader : std::false_type {};
++
++template <class Protocol>
++struct has_batched_int_list_reader<
++    Protocol,
++    std::int16_t,
++    folly::void_t<decltype(std::declval<Protocol&>().readI16List(
++        std::declval<std::int16_t*>(), std::uint32_t{}))>>
++    : std::true_type {};
++
++template <class Protocol>
++struct has_batched_int_list_reader<
++    Protocol,
++    std::int32_t,
++    folly::void_t<decltype(std::declval<Protocol&>().readI32List(
++        std::declval<std::int32_t*>(), std::uint32_t{}))>>
++    : std::true_type {};
++
++template <class Protocol>
++struct has_batched_int_list_reader<
++    Protocol,
++    std::int64_t,
++    folly::void_t<decltype(std::declval<Protocol&>().readI64List(
++        std::declval<std::int64_t*>(), std::uint32_t{}))>>
++    : std::true_type {};
++
++// True iff `Container` exposes both `.resize(size_t)` and `.data()` returning
++// a writable `Elem*`. Matches std::vector<int{16,32,64}_t>, folly::fbvector
++// and any other contiguous resizable container; rejects std::list / std::deque
++// / non-contiguous types at compile time.
++template <class Container, class Elem, class = void>
++struct is_resizable_elem_container : std::false_type {};
++
++template <class Container, class Elem>
++struct is_resizable_elem_container<
++    Container,
++    Elem,
++    folly::void_t<
++        decltype(std::declval<Container&>().resize(std::size_t{})),
++        decltype(std::declval<Container&>().data())>>
++    : std::is_same<
++          Elem*,
++          decltype(std::declval<Container&>().data())> {};
++
++template <class Protocol, class Container, class Elem>
++constexpr bool can_batch_int_list_read_v =
++    has_batched_int_list_reader<Protocol, Elem>::value &&
++    is_resizable_elem_container<Container, Elem>::value;
++
+ /*
+  * List Specialization
+  */
+@@ -533,9 +642,30 @@ struct protocol_methods<type_class::list<ElemClass>, Type> {
+           protocol::TProtocolException::throwTruncatedData();
+         }
+ 
+-        reserve_if_possible(&out, list_size);
+-        while (list_size--) {
+-          elem_methods::read(protocol, emplace_back_default(out));
++        // Fast path: contiguous resizable list of int16/int32/int64 on a
++        // protocol that exposes readI{N}List (currently BinaryProtocolReader).
++        // Pulls all bytes in one cursor call and bswaps in a vectorizable
++        // loop. Result is byte-equivalent to the per-element path.
++        if constexpr (
++            std::is_same_v<ElemClass, type_class::integral> &&
++            (std::is_same_v<elem_type, std::int16_t> ||
++             std::is_same_v<elem_type, std::int32_t> ||
++             std::is_same_v<elem_type, std::int64_t>) &&
++            can_batch_int_list_read_v<Protocol, Type, elem_type>) {
++          const std::size_t old_size = out.size();
++          out.resize(old_size + list_size);
++          if constexpr (std::is_same_v<elem_type, std::int16_t>) {
++            protocol.readI16List(out.data() + old_size, list_size);
++          } else if constexpr (std::is_same_v<elem_type, std::int32_t>) {
++            protocol.readI32List(out.data() + old_size, list_size);
++          } else {
++            protocol.readI64List(out.data() + old_size, list_size);
++          }
++        } else {
++          reserve_if_possible(&out, list_size);
++          while (list_size--) {
++            elem_methods::read(protocol, emplace_back_default(out));
++          }
+         }
+       }
+     }
+@@ -549,16 +679,36 @@ struct protocol_methods<type_class::list<ElemClass>, Type> {
+ 
+   template <typename Protocol>
+   static std::size_t write(Protocol& protocol, const Type& out) {
+-    std::size_t xfer = 0;
++    // Fast path: contiguous list of int16/int32/int64 on a protocol that
++    // exposes writeI{N}List (currently only CompactProtocolWriter). The
++    // batched method emits exactly the same bytes as
++    // writeListBegin(...) + per-element writeI{N}(...) + writeListEnd(...).
++    if constexpr (
++        std::is_same_v<ElemClass, type_class::integral> &&
++        (std::is_same_v<elem_type, std::int16_t> ||
++         std::is_same_v<elem_type, std::int32_t> ||
++         std::is_same_v<elem_type, std::int64_t>) &&
++        can_batch_int_list_write_v<Protocol, Type, elem_type>) {
++      const std::uint32_t size = checked_container_size(out.size());
++      if constexpr (std::is_same_v<elem_type, std::int16_t>) {
++        return protocol.writeI16List(out.data(), size);
++      } else if constexpr (std::is_same_v<elem_type, std::int32_t>) {
++        return protocol.writeI32List(out.data(), size);
++      } else {
++        return protocol.writeI64List(out.data(), size);
++      }
++    } else {
++      std::size_t xfer = 0;
+ 
+-    xfer += protocol.writeListBegin(
+-        elem_ttype::value, checked_container_size(out.size()));
++      xfer += protocol.writeListBegin(
++          elem_ttype::value, checked_container_size(out.size()));
+ 
+-    for (const auto& elem : out) {
+-      xfer += elem_methods::write(protocol, elem);
++      for (const auto& elem : out) {
++        xfer += elem_methods::write(protocol, elem);
++      }
++      xfer += protocol.writeListEnd();
++      return xfer;
+     }
+-    xfer += protocol.writeListEnd();
+-    return xfer;
+   }
+ 
+   template <bool ZeroCopy, typename Protocol>
+diff --git a/thrift/lib/cpp2/server/BaseThriftServer.h b/thrift/lib/cpp2/server/BaseThriftServer.h
+index 90d6aa9f94b12a3f66b3c577333a3893ea31e0d4..f7859dd7a6a1387eaff00997ede362d093495bac 100644
+--- a/thrift/lib/cpp2/server/BaseThriftServer.h
++++ b/thrift/lib/cpp2/server/BaseThriftServer.h
+@@ -650,12 +650,10 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
+    */
+   std::shared_ptr<concurrency::ThreadManager> getThreadManager_deprecated()
+       const override {
+-    std::lock_guard<std::mutex> lock(threadManagerMutex_);
+     return tmLoggingWrapper_;
+   }
+ 
+   std::shared_ptr<folly::Executor> getThreadManager() const override {
+-    std::lock_guard<std::mutex> lock(threadManagerMutex_);
+     return threadManager_;
+   }
+ 
+@@ -672,7 +670,6 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
+           .sharedPtrExecutor()
+           .value();
+     }
+-    std::lock_guard<std::mutex> lock(threadManagerMutex_);
+     return threadManager_;
+   }
+ 
+@@ -684,7 +681,6 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
+           .value()
+           .get();
+     }
+-    std::lock_guard<std::mutex> lock(threadManagerMutex_);
+     return threadManager_.get();
+   }
+ 
+diff --git a/thrift/lib/cpp2/test/CMakeLists.txt b/thrift/lib/cpp2/test/CMakeLists.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..0351f8a41080723b983f499f47f2d645f27d8bd1
+--- /dev/null
++++ b/thrift/lib/cpp2/test/CMakeLists.txt
+@@ -0,0 +1,78 @@
++thrift_generate(
++  "Service"
++  "TestService"
++  "cpp2"
++  ""
++  "${CMAKE_CURRENT_SOURCE_DIR}"
++  "${CMAKE_CURRENT_BINARY_DIR}"
++  "thrift/lib/cpp2/test"
++  THRIFT_INCLUDE_DIRECTORIES ${CMAKE_SOURCE_DIR}
++)
++
++bypass_source_check("${Service-cpp2-SOURCES}")
++
++add_executable(SerializationTest
++  SerializationTest.cpp
++  ServiceSimpleJSONInstantiation.cpp
++  ProtocolListFastPathTest.cpp
++  ${Service-cpp2-SOURCES}
++)
++add_dependencies(SerializationTest Service-cpp2-target)
++target_include_directories(SerializationTest PRIVATE
++  ${CMAKE_CURRENT_BINARY_DIR}
++  ${CMAKE_SOURCE_DIR}
++)
++target_link_libraries(SerializationTest
++  thriftcpp2
++  thriftprotocol
++  Folly::folly
++  ${GTEST_BOTH_LIBRARIES}
++  ${GMOCK_BOTH_LIBRARIES}
++  pthread
++)
++
++if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
++  target_compile_options(SerializationTest PRIVATE
++    -fprofile-instr-generate
++    -fcoverage-mapping
++  )
++  target_link_options(SerializationTest PRIVATE
++    -fprofile-instr-generate
++  )
++endif()
++
++#gtest_add_tests(SerializationTest "" SerializationTest.cpp)
++add_test(NAME SerializationTest COMMAND SerializationTest)
++set_tests_properties(SerializationTest PROPERTIES
++  PASS_REGULAR_EXPRESSION "\\[  PASSED  \\] [0-9]+ tests"
++)
++
++# THeader::removeHeader frameLength tests
++add_executable(THeaderFrameLength-t
++  ../../cpp/transport/test/THeaderFrameLengthTest.cpp
++)
++target_link_libraries(THeaderFrameLength-t
++  transport thriftcpp2 thrift-core rpcmetadata thriftprotocol thrifttype concurrency async
++  Folly::folly
++  GTest::gtest GTest::gtest_main
++  pthread
++)
++
++# FramingHandler / ServerFramingHandler / ClientFramingHandler tests
++add_executable(FramingHandlerTest-t
++  ../async/tests/FramingHandlerTest.cpp
++)
++target_link_libraries(FramingHandlerTest-t
++  thriftcpp2 thrift-core transport async concurrency rpcmetadata thriftprotocol thrifttype thriftannotation thriftanyrep thriftfrozen2 thriftmetadata
++  Folly::folly fizz::fizz wangle::wangle
++  GTest::gtest GTest::gmock
++  event double-conversion
++  boost_context boost_filesystem boost_program_options boost_regex boost_system boost_thread
++  fmt::fmt
++  ssl crypto sodium z zstd lzma
++  dl pthread atomic
++)
++
++add_test(NAME THeaderFrameLength COMMAND THeaderFrameLength-t)
++
++add_test(NAME FramingHandlerTest COMMAND FramingHandlerTest-t)
+diff --git a/thrift/lib/cpp2/test/ChannelTest.cpp b/thrift/lib/cpp2/test/ChannelTest.cpp
+index 828b462b4b9ffb131d7d538100059f2432ba1f10..397964a7cdad8df0afb138a05f7202b5a34a4b58 100644
+--- a/thrift/lib/cpp2/test/ChannelTest.cpp
++++ b/thrift/lib/cpp2/test/ChannelTest.cpp
+@@ -112,30 +112,30 @@ class EventBaseAborter : public folly::AsyncTimeout {
+ // Creates/unwraps a framed message (LEN(MSG) | MSG)
+ class TestFramingHandler : public FramingHandler {
+  public:
+-  std::tuple<unique_ptr<IOBuf>, size_t, unique_ptr<THeader>> removeFrame(
++  std::tuple<unique_ptr<IOBuf>, size_t, unique_ptr<THeader>, size_t> removeFrame(
+       IOBufQueue* q) override {
+     assert(q);
+     queue_.append(*q);
+     if (!queue_.front() || queue_.front()->empty()) {
+-      return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr);
++      return make_tuple(std::unique_ptr<IOBuf>(), 0, nullptr, 0);
+     }
+ 
+     uint32_t len = queue_.front()->computeChainDataLength();
+ 
+     if (len < 4) {
+       size_t remaining = 4 - len;
+-      return make_tuple(unique_ptr<IOBuf>(), remaining, nullptr);
++      return make_tuple(unique_ptr<IOBuf>(), remaining, nullptr, 0);
+     }
+ 
+     folly::io::Cursor c(queue_.front());
+     uint32_t msgLen = c.readBE<uint32_t>();
+     if (len - 4 < msgLen) {
+       size_t remaining = msgLen - (len - 4);
+-      return make_tuple(unique_ptr<IOBuf>(), remaining, nullptr);
++      return make_tuple(unique_ptr<IOBuf>(), remaining, nullptr, 0);
+     }
+ 
+     queue_.trimStart(4);
+-    return make_tuple(queue_.split(msgLen), 0, nullptr);
++    return make_tuple(queue_.split(msgLen), 0, nullptr, 0);
+   }
+ 
+   unique_ptr<IOBuf> addFrame(unique_ptr<IOBuf> buf, THeader*) override {
+diff --git a/thrift/lib/cpp2/test/ProtocolListFastPathTest.cpp b/thrift/lib/cpp2/test/ProtocolListFastPathTest.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..b8577ca62b24a6f4c16d91fd55bd947ca02c974d
+--- /dev/null
++++ b/thrift/lib/cpp2/test/ProtocolListFastPathTest.cpp
+@@ -0,0 +1,327 @@
++#include <cstdint>
++#include <limits>
++#include <string>
++#include <type_traits>
++#include <vector>
++
++#include <folly/Range.h>
++#include <folly/io/IOBuf.h>
++#include <folly/io/IOBufQueue.h>
++#include <folly/portability/GTest.h>
++
++#include <thrift/lib/cpp/protocol/TType.h>
++#include <thrift/lib/cpp2/op/Encode.h>
++#include <thrift/lib/cpp2/protocol/BinaryProtocol.h>
++#include <thrift/lib/cpp2/protocol/CompactProtocol.h>
++#include <thrift/lib/cpp2/protocol/Cpp2Ops.h>
++#include <thrift/lib/cpp2/protocol/detail/protocol_methods.h>
++
++namespace apache {
++namespace thrift {
++namespace test {
++namespace {
++
++template <class T>
++protocol::TType thriftType();
++
++template <>
++protocol::TType thriftType<std::int16_t>() {
++  return protocol::T_I16;
++}
++
++template <>
++protocol::TType thriftType<std::int32_t>() {
++  return protocol::T_I32;
++}
++
++template <>
++protocol::TType thriftType<std::int64_t>() {
++  return protocol::T_I64;
++}
++
++template <class T>
++const std::vector<T>& values();
++
++template <>
++const std::vector<std::int16_t>& values<std::int16_t>() {
++  static const std::vector<std::int16_t> kValues = {
++      0,
++      1,
++      -1,
++      127,
++      -128,
++      128,
++      -129,
++      std::numeric_limits<std::int16_t>::min(),
++      std::numeric_limits<std::int16_t>::max()};
++  return kValues;
++}
++
++template <>
++const std::vector<std::int32_t>& values<std::int32_t>() {
++  static const std::vector<std::int32_t> kValues = {
++      0,
++      1,
++      -1,
++      63,
++      -64,
++      64,
++      -65,
++      8191,
++      -8192,
++      8192,
++      -8193,
++      std::numeric_limits<std::int32_t>::min(),
++      std::numeric_limits<std::int32_t>::max()};
++  return kValues;
++}
++
++template <>
++const std::vector<std::int64_t>& values<std::int64_t>() {
++  static const std::vector<std::int64_t> kValues = {
++      0,
++      1,
++      -1,
++      63,
++      -64,
++      64,
++      -65,
++      8191,
++      -8192,
++      8192,
++      -8193,
++      (std::int64_t{1} << 32) - 1,
++      -(std::int64_t{1} << 32),
++      std::numeric_limits<std::int64_t>::min(),
++      std::numeric_limits<std::int64_t>::max()};
++  return kValues;
++}
++
++std::string drain(folly::IOBufQueue& queue) {
++  auto buf = queue.move();
++  return folly::StringPiece(buf->coalesce()).str();
++}
++
++template <class Writer, class F>
++std::string serializeWith(F&& f) {
++  folly::IOBufQueue queue;
++  Writer writer;
++  writer.setOutput(&queue);
++  f(writer);
++  return drain(queue);
++}
++
++template <class Writer, class T>
++std::string writeListManually(const std::vector<T>& in) {
++  return serializeWith<Writer>([&](Writer& writer) {
++    writer.writeListBegin(thriftType<T>(), static_cast<std::uint32_t>(in.size()));
++    for (const auto value : in) {
++      if constexpr (std::is_same_v<T, std::int16_t>) {
++        writer.writeI16(value);
++      } else if constexpr (std::is_same_v<T, std::int32_t>) {
++        writer.writeI32(value);
++      } else {
++        writer.writeI64(value);
++      }
++    }
++    writer.writeListEnd();
++  });
++}
++
++template <class Writer, class T>
++std::string writeListBatched(const std::vector<T>& in) {
++  return serializeWith<Writer>([&](Writer& writer) {
++    const auto size = static_cast<std::uint32_t>(in.size());
++    if constexpr (std::is_same_v<T, std::int16_t>) {
++      writer.writeI16List(in.data(), size);
++    } else if constexpr (std::is_same_v<T, std::int32_t>) {
++      writer.writeI32List(in.data(), size);
++    } else {
++      writer.writeI64List(in.data(), size);
++    }
++  });
++}
++
++template <class Writer, class T>
++std::string writeListWithProtocolMethods(const std::vector<T>& in) {
++  return serializeWith<Writer>([&](Writer& writer) {
++    using Methods = detail::pm::
++        protocol_methods<type_class::list<type_class::integral>, std::vector<T>>;
++    Methods::write(writer, in);
++  });
++}
++
++template <class Writer, class T>
++std::string writeListWithCpp2OpsHelper(const std::vector<T>& in) {
++  return serializeWith<Writer>(
++      [&](Writer& writer) { detail::writeVarintList(writer, in); });
++}
++
++template <class Writer, class Tag, class T>
++std::string writeListWithOpEncode(const std::vector<T>& in) {
++  return serializeWith<Writer>([&](Writer& writer) { op::encode<Tag>(writer, in); });
++}
++
++template <class Reader, class T>
++std::vector<T> readListBatched(const std::string& serialized) {
++  auto buf = folly::IOBuf::copyBuffer(serialized);
++  Reader reader;
++  reader.setInput(buf.get());
++
++  protocol::TType elemType;
++  std::uint32_t size;
++  reader.readListBegin(elemType, size);
++  EXPECT_EQ(elemType, thriftType<T>());
++
++  std::vector<T> out(size);
++  if constexpr (std::is_same_v<T, std::int16_t>) {
++    reader.readI16List(out.data(), size);
++  } else if constexpr (std::is_same_v<T, std::int32_t>) {
++    reader.readI32List(out.data(), size);
++  } else {
++    reader.readI64List(out.data(), size);
++  }
++  reader.readListEnd();
++  return out;
++}
++
++template <class Reader, class T>
++std::vector<T> readListWithProtocolMethods(const std::string& serialized) {
++  auto buf = folly::IOBuf::copyBuffer(serialized);
++  Reader reader;
++  reader.setInput(buf.get());
++
++  std::vector<T> out{T{7}, T{8}};
++  using Methods = detail::pm::
++      protocol_methods<type_class::list<type_class::integral>, std::vector<T>>;
++  Methods::read(reader, out);
++  return out;
++}
++
++template <class Reader, class Tag, class T>
++std::vector<T> readListWithOpDecode(const std::string& serialized) {
++  auto buf = folly::IOBuf::copyBuffer(serialized);
++  Reader reader;
++  reader.setInput(buf.get());
++
++  std::vector<T> out;
++  op::decode<Tag>(reader, out);
++  return out;
++}
++
++template <class Writer>
++void expectBatchedWritersMatchElementLoop() {
++  EXPECT_EQ(
++      (writeListManually<Writer>(values<std::int16_t>())),
++      (writeListBatched<Writer>(values<std::int16_t>())));
++  EXPECT_EQ(
++      (writeListManually<Writer>(values<std::int32_t>())),
++      (writeListBatched<Writer>(values<std::int32_t>())));
++  EXPECT_EQ(
++      (writeListManually<Writer>(values<std::int64_t>())),
++      (writeListBatched<Writer>(values<std::int64_t>())));
++}
++
++template <class Writer>
++void expectProtocolEntryPointsMatchElementLoop() {
++  EXPECT_EQ(
++      (writeListManually<Writer>(values<std::int16_t>())),
++      (writeListWithProtocolMethods<Writer>(values<std::int16_t>())));
++  EXPECT_EQ(
++      (writeListManually<Writer>(values<std::int32_t>())),
++      (writeListWithProtocolMethods<Writer>(values<std::int32_t>())));
++  EXPECT_EQ(
++      (writeListManually<Writer>(values<std::int64_t>())),
++      (writeListWithProtocolMethods<Writer>(values<std::int64_t>())));
++
++  EXPECT_EQ(
++      (writeListManually<Writer>(values<std::int16_t>())),
++      (writeListWithCpp2OpsHelper<Writer>(values<std::int16_t>())));
++  EXPECT_EQ(
++      (writeListManually<Writer>(values<std::int32_t>())),
++      (writeListWithCpp2OpsHelper<Writer>(values<std::int32_t>())));
++  EXPECT_EQ(
++      (writeListManually<Writer>(values<std::int64_t>())),
++      (writeListWithCpp2OpsHelper<Writer>(values<std::int64_t>())));
++}
++
++TEST(ProtocolListFastPathTest, BinaryBatchedWritersMatchElementLoop) {
++  expectBatchedWritersMatchElementLoop<BinaryProtocolWriter>();
++}
++
++TEST(ProtocolListFastPathTest, CompactBatchedWritersMatchElementLoop) {
++  expectBatchedWritersMatchElementLoop<CompactProtocolWriter>();
++}
++
++TEST(ProtocolListFastPathTest, BinaryBatchedReadersRoundTrip) {
++  EXPECT_EQ(
++      values<std::int16_t>(),
++      (readListBatched<BinaryProtocolReader, std::int16_t>(
++          writeListBatched<BinaryProtocolWriter>(values<std::int16_t>()))));
++  EXPECT_EQ(
++      values<std::int32_t>(),
++      (readListBatched<BinaryProtocolReader, std::int32_t>(
++          writeListBatched<BinaryProtocolWriter>(values<std::int32_t>()))));
++  EXPECT_EQ(
++      values<std::int64_t>(),
++      (readListBatched<BinaryProtocolReader, std::int64_t>(
++          writeListBatched<BinaryProtocolWriter>(values<std::int64_t>()))));
++}
++
++TEST(ProtocolListFastPathTest, ProtocolMethodsMatchElementLoop) {
++  expectProtocolEntryPointsMatchElementLoop<BinaryProtocolWriter>();
++  expectProtocolEntryPointsMatchElementLoop<CompactProtocolWriter>();
++}
++
++TEST(ProtocolListFastPathTest, BinaryProtocolMethodsReadAppendValues) {
++  {
++    auto out = readListWithProtocolMethods<BinaryProtocolReader, std::int16_t>(
++        writeListBatched<BinaryProtocolWriter>(values<std::int16_t>()));
++    std::vector<std::int16_t> expected{7, 8};
++    expected.insert(
++        expected.end(), values<std::int16_t>().begin(), values<std::int16_t>().end());
++    EXPECT_EQ(expected, out);
++  }
++  {
++    auto out = readListWithProtocolMethods<BinaryProtocolReader, std::int32_t>(
++        writeListBatched<BinaryProtocolWriter>(values<std::int32_t>()));
++    std::vector<std::int32_t> expected{7, 8};
++    expected.insert(
++        expected.end(), values<std::int32_t>().begin(), values<std::int32_t>().end());
++    EXPECT_EQ(expected, out);
++  }
++  {
++    auto out = readListWithProtocolMethods<BinaryProtocolReader, std::int64_t>(
++        writeListBatched<BinaryProtocolWriter>(values<std::int64_t>()));
++    std::vector<std::int64_t> expected{7, 8};
++    expected.insert(
++        expected.end(), values<std::int64_t>().begin(), values<std::int64_t>().end());
++    EXPECT_EQ(expected, out);
++  }
++}
++
++TEST(ProtocolListFastPathTest, OpEncodeMatchesElementLoopAndDecodes) {
++  EXPECT_EQ(
++      (writeListManually<BinaryProtocolWriter>(values<std::int32_t>())),
++      (writeListWithOpEncode<
++          BinaryProtocolWriter,
++          type::list<type::i32_t>>(values<std::int32_t>())));
++  EXPECT_EQ(
++      (writeListManually<CompactProtocolWriter>(values<std::int64_t>())),
++      (writeListWithOpEncode<
++          CompactProtocolWriter,
++          type::list<type::i64_t>>(values<std::int64_t>())));
++
++  EXPECT_EQ(
++      values<std::int32_t>(),
++      (readListWithOpDecode<
++          BinaryProtocolReader,
++          type::list<type::i32_t>,
++          std::int32_t>(writeListBatched<BinaryProtocolWriter>(
++          values<std::int32_t>()))));
++}
++
++} // namespace
++} // namespace test
++} // namespace thrift
++} // namespace apache
+\ No newline at end of file
+diff --git a/thrift/lib/cpp2/test/ServiceSimpleJSONInstantiation.cpp b/thrift/lib/cpp2/test/ServiceSimpleJSONInstantiation.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..982c6359c6695daa91064cc16d2cded74a272566
+--- /dev/null
++++ b/thrift/lib/cpp2/test/ServiceSimpleJSONInstantiation.cpp
+@@ -0,0 +1,29 @@
++// 手动补充 SimpleJSONProtocol 的模板实例化
++// 因为 thrift1 v2022.11.14 默认只生成 Binary/Compact 的实例化
++
++#include <thrift/lib/cpp2/test/gen-cpp2/Service_types.tcc>
++#include <thrift/lib/cpp2/protocol/SimpleJSONProtocol.h>
++
++namespace apache { namespace thrift { namespace test {
++
++template void TestStruct::readNoXfer<>(apache::thrift::SimpleJSONProtocolReader*);
++template uint32_t TestStruct::write<>(apache::thrift::SimpleJSONProtocolWriter*) const;
++template uint32_t TestStruct::serializedSize<>(apache::thrift::SimpleJSONProtocolWriter const*) const;
++template uint32_t TestStruct::serializedSizeZC<>(apache::thrift::SimpleJSONProtocolWriter const*) const;
++
++template void TestStructIOBuf::readNoXfer<>(apache::thrift::SimpleJSONProtocolReader*);
++template uint32_t TestStructIOBuf::write<>(apache::thrift::SimpleJSONProtocolWriter*) const;
++template uint32_t TestStructIOBuf::serializedSize<>(apache::thrift::SimpleJSONProtocolWriter const*) const;
++template uint32_t TestStructIOBuf::serializedSizeZC<>(apache::thrift::SimpleJSONProtocolWriter const*) const;
++
++template void TestStructRecursive::readNoXfer<>(apache::thrift::SimpleJSONProtocolReader*);
++template uint32_t TestStructRecursive::write<>(apache::thrift::SimpleJSONProtocolWriter*) const;
++template uint32_t TestStructRecursive::serializedSize<>(apache::thrift::SimpleJSONProtocolWriter const*) const;
++template uint32_t TestStructRecursive::serializedSizeZC<>(apache::thrift::SimpleJSONProtocolWriter const*) const;
++
++template void TestUnsignedIntStruct::readNoXfer<>(apache::thrift::SimpleJSONProtocolReader*);
++template uint32_t TestUnsignedIntStruct::write<>(apache::thrift::SimpleJSONProtocolWriter*) const;
++template uint32_t TestUnsignedIntStruct::serializedSize<>(apache::thrift::SimpleJSONProtocolWriter const*) const;
++template uint32_t TestUnsignedIntStruct::serializedSizeZC<>(apache::thrift::SimpleJSONProtocolWriter const*) const;
++
++}}} // namespace apache::thrift::test
+diff --git a/thrift/lib/py3/serializer.pxd b/thrift/lib/py3/serializer.pxd
+index a9075af936a88dae7ab0fffa795488cb46182c51..cd77b2d1b64217f0849979d9b72dd8f92933c78b 100644
+--- a/thrift/lib/py3/serializer.pxd
++++ b/thrift/lib/py3/serializer.pxd
+@@ -41,4 +41,4 @@ cdef extern from "thrift/lib/cpp/transport/THeader.h" namespace "apache::thrift:
+         uint16_t getProtocolId()
+         void setTransform(Transform)
+         unique_ptr[cIOBuf] addHeader(unique_ptr[cIOBuf], F14NodeMap[string, string])
+-        unique_ptr[cIOBuf] removeHeader(cIOBufQueue*, size_t&, F14NodeMap[string, string]) except +
++        unique_ptr[cIOBuf] removeHeader(cIOBufQueue*, size_t&, F14NodeMap[string, string], size_t&) except +
+diff --git a/thrift/lib/py3/serializer.pyx b/thrift/lib/py3/serializer.pyx
+index 48c20dbb9ac20e2ad7436c35127774eecac840c7..6c8018cfc3f30b20031d6e2dc8d8e675ad9f330f 100644
+--- a/thrift/lib/py3/serializer.pyx
++++ b/thrift/lib/py3/serializer.pyx
+@@ -75,9 +75,11 @@ def deserialize_from_header(structKlass, buf not None):
+     cdef cTHeader header
+     cdef F14NodeMap[string, string] pheaders
+     cdef size_t needed = 0
++    cdef size_t frame_length = 0
+     cdef unique_ptr[cIOBuf] cbuf
+     try:
+-        cbuf = _fbthrift_iobuf.move(header.removeHeader(&queue, needed, pheaders))
++        cbuf = _fbthrift_iobuf.move(
++            header.removeHeader(&queue, needed, pheaders, frame_length))
+     except Exception as e:
+         raise Error.__new__(Error, *e.args) from None
+     if cbuf == NULL:
+diff --git a/thrift/test/CompressTest.cpp b/thrift/test/CompressTest.cpp
+index be6e373be2a46caf95c6044a3e1ad938269e113d..43e98f225a3a7d98dbc15e61fa9a19a746c14675 100644
+--- a/thrift/test/CompressTest.cpp
++++ b/thrift/test/CompressTest.cpp
+@@ -43,6 +43,7 @@ void testMessage(
+   }
+   THeader::StringToStringMap strMap;
+   size_t neaded;
++  size_t frameLength;
+ 
+   for (int i = 0; i < iters; i++) {
+     if (easyMessage) {
+@@ -59,7 +60,7 @@ void testMessage(
+ 
+     auto withHeader = header.addHeader(out.move(), strMap);
+     out.append(std::move(withHeader));
+-    auto buf = header.removeHeader(&out, neaded, strMap);
++    auto buf = header.removeHeader(&out, neaded, strMap, frameLength);
+ 
+     if (binary) {
+       BinarySerializer::deserialize(buf.get(), bin);
+@@ -92,10 +93,11 @@ void testChainedCompression(uint8_t flag, int iters) {
+   printf("%i\n", (int)compressed->length());
+ 
+   size_t needed = 0;
++  size_t frameLength2 = 0;
+   folly::IOBufQueue q;
+   q.append(std::move(compressed));
+ 
+-  auto uncompressed = header.removeHeader(&q, needed, persistentHeaders);
++  auto uncompressed = header.removeHeader(&q, needed, persistentHeaders, frameLength2);
+   EXPECT_NE(uncompressed, nullptr);
+   EXPECT_EQ(needed, 0);
+   EXPECT_TRUE(q.empty());
+diff --git a/thrift/test/THeaderTest.cpp b/thrift/test/THeaderTest.cpp
+index 63df5efa644a37668d7af8bb164fb379156469d4..5e9ee269bc435425962c591528bfb186bc51c6b2 100644
+--- a/thrift/test/THeaderTest.cpp
++++ b/thrift/test/THeaderTest.cpp
+@@ -39,8 +39,9 @@ TEST(THeaderTest, removeBadHeaderStringSize) {
+   // Try to remove the bad header
+   THeader header;
+   size_t needed;
++  size_t frameLength;
+   THeader::StringToStringMap persistentHeaders;
+   EXPECT_THROW(
+-      auto buf = header.removeHeader(&queue, needed, persistentHeaders),
++      auto buf = header.removeHeader(&queue, needed, persistentHeaders, frameLength),
+       TTransportException);
+ }

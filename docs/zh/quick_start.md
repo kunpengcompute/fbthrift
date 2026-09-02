@@ -9,14 +9,14 @@
 统一从公共仓库获取Benchmark与自动构建脚本。
 
 ```bash
-git clone https://gitcode.com/donghuanan/AccLibBenchmark.git
+git clone https://gitcode.com/boostkit/AccLibBenchmark.git
 cd AccLibBenchmark
 ```
 
 仓库中与FbThrift相关的两个目录职责如下。(若无权限请联系管理员申请并说明原因。)
 
-- [fbthrift_folly_benchmark](https://gitcode.com/donghuanan/AccLibBenchmark/tree/master/fbthrift_folly_benchmark)：存放`press.thrift`、CMake配置、`press_client`和`press_server`源码。
-- [fb_folly_autobuild](https://gitcode.com/donghuanan/AccLibBenchmark/tree/master/fb_folly_autobuild)：存放`install.py`自动构建脚本、`run.py`性能矩阵脚本及使用说明。
+- [fbthrift_folly_benchmark](https://gitcode.com/boostkit/AccLibBenchmark/tree/master/fbthrift_folly_benchmark)：存放`press.thrift`、CMake配置、`press_client`和`press_server`源码。
+- [fb_folly_autobuild](https://gitcode.com/boostkit/AccLibBenchmark/tree/master/fb_folly_autobuild)：存放`install.py`自动构建脚本、`run.py`性能矩阵脚本及使用说明。
 
 ```text
 AccLibBenchmark/

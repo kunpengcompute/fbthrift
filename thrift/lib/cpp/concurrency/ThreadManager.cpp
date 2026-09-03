@@ -24,6 +24,7 @@
 #include <queue>
 #include <set>
 #include <string>
+#include <variant>
 
 #include <glog/logging.h>
 
@@ -49,6 +50,11 @@
 
 FOLLY_GFLAGS_DEFINE_bool(
     codel_enabled, false, "Enable codel queue timeout algorithm");
+
+FOLLY_GFLAGS_DEFINE_bool(
+    thrift_thread_manager_direct_func_enabled,
+    true,
+    "Store folly::Func directly in ThreadManager tasks");
 
 namespace apache {
 namespace thrift {
@@ -172,20 +178,56 @@ class ThreadManager::Task {
         context_(folly::RequestContext::saveContext()),
         qpriority_(qpriority) {}
 
+  Task(
+      folly::Func func,
+      const std::chrono::milliseconds& expiration,
+      size_t qpriority)
+      : runnable_(std::move(func)),
+        queueBeginTime_(std::chrono::steady_clock::now()),
+        expireTime_(
+            expiration > std::chrono::milliseconds::zero()
+                ? queueBeginTime_ + expiration
+                : std::chrono::steady_clock::time_point()),
+        context_(folly::RequestContext::saveContext()),
+        qpriority_(qpriority) {}
+
   ~Task() {}
 
   void run() {
     folly::RequestContextScopeGuard rctx(context_);
-    invokeCatchingExns(
-        "ThreadManager: func", [&] { std::exchange(runnable_, {})->run(); });
+    invokeCatchingExns("ThreadManager: func", [&] {
+      if (auto* func = std::get_if<folly::Func>(&runnable_)) {
+        std::exchange(*func, folly::Func{})();
+      } else {
+        std::exchange(
+            std::get<std::shared_ptr<Runnable>>(runnable_),
+            std::shared_ptr<Runnable>{})
+            ->run();
+      }
+    });
   }
 
   void skip() {
     folly::RequestContextScopeGuard rctx(context_);
-    std::exchange(runnable_, {});
+    if (auto* func = std::get_if<folly::Func>(&runnable_)) {
+      std::exchange(*func, folly::Func{});
+    } else {
+      std::exchange(
+          std::get<std::shared_ptr<Runnable>>(runnable_),
+          std::shared_ptr<Runnable>{});
+    }
   }
 
-  const std::shared_ptr<Runnable>& getRunnable() const { return runnable_; }
+  const std::shared_ptr<Runnable>& getRunnable() const {
+    // Preserve the legacy callback/removal API without paying for a
+    // FunctionRunner allocation on the normal execution path.
+    if (auto* func = std::get_if<folly::Func>(&runnable_)) {
+      auto runnable = FunctionRunner::create(std::move(*func));
+      runnable_.template emplace<std::shared_ptr<Runnable>>(
+          std::move(runnable));
+    }
+    return std::get<std::shared_ptr<Runnable>>(runnable_);
+  }
 
   std::chrono::steady_clock::time_point getExpireTime() const {
     return expireTime_;
@@ -208,7 +250,7 @@ class ThreadManager::Task {
   size_t queuePriority() const { return qpriority_; }
 
  private:
-  std::shared_ptr<Runnable> runnable_;
+  mutable std::variant<std::shared_ptr<Runnable>, folly::Func> runnable_;
   std::chrono::steady_clock::time_point queueBeginTime_;
   std::chrono::steady_clock::time_point expireTime_;
   std::shared_ptr<folly::RequestContext> context_;
@@ -310,7 +352,11 @@ class ThreadManager::Impl : public ThreadManager,
    * Implements folly::Executor::add()
    */
   void add(folly::Func f) override {
-    add(FunctionRunner::create(std::move(f)));
+    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
+      addFunc(0, std::move(f), 0, Source::INTERNAL);
+    } else {
+      add(FunctionRunner::create(std::move(f)));
+    }
   }
 
   void remove(std::shared_ptr<Runnable> task) override;
@@ -349,6 +395,12 @@ class ThreadManager::Impl : public ThreadManager,
   void addTaskObserver(std::shared_ptr<Observer> observer) override;
 
   std::chrono::nanoseconds getUsedCpuTime() const override;
+
+  void addFunc(
+      size_t priority,
+      folly::Func func,
+      int64_t expiration,
+      Source source) noexcept;
 
  protected:
   void add(
@@ -455,7 +507,11 @@ class SimpleThreadManagerImpl : public ThreadManager::Impl {
 
   void addWithPriorityAndSource(folly::Func f, PRIORITY pri, Source source) {
     DCHECK(pri == PRIORITY::NORMAL);
-    add(FunctionRunner::create(std::move(f)), 0, 0, source);
+    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
+      addFunc(0, std::move(f), 0, source);
+    } else {
+      add(FunctionRunner::create(std::move(f)), 0, 0, source);
+    }
   }
 
  private:
@@ -884,6 +940,38 @@ void ThreadManager::Impl::add(
   }
 }
 
+void ThreadManager::Impl::addFunc(
+    size_t priority,
+    folly::Func func,
+    int64_t expiration,
+    ThreadManager::Source source) noexcept {
+  CHECK(
+      state_ != ThreadManager::UNINITIALIZED &&
+      state_ != ThreadManager::STARTING)
+      << "ThreadManager::Impl::addFunc ThreadManager not started";
+
+  if (state_ != ThreadManager::STARTED) {
+    LOG(WARNING) << "abort addFunc() that got called after join() or stop()";
+    return;
+  }
+
+  priority = N_SOURCES * priority + static_cast<int>(source);
+  const auto qpriority = std::min(tasks_.priorities() - 1, priority);
+  auto task = std::make_unique<Task>(
+      std::move(func), std::chrono::milliseconds{expiration}, qpriority);
+  if (queueObservers_) {
+    task->queueObserverPayload() =
+        queueObservers_->at(qpriority)->onEnqueued(task->getContext().get());
+  }
+  tasks_.at_priority(qpriority).enqueue(std::move(task));
+
+  ++totalTaskCount_;
+
+  if (idleCount_ > 0) {
+    waitSem_.post();
+  }
+}
+
 void ThreadManager::Impl::remove(std::shared_ptr<Runnable> /*task*/) {
   std::unique_lock<std::mutex> l(mutex_);
   if (state_ != ThreadManager::STARTED) {
@@ -1191,7 +1279,11 @@ class PriorityThreadManager::PriorityImpl
   }
 
   void addWithPriorityAndSource(folly::Func f, PRIORITY pri, Source source) {
-    managers_[pri]->add(FunctionRunner::create(std::move(f)), 0, 0, source);
+    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
+      managers_[pri]->addFunc(0, std::move(f), 0, source);
+    } else {
+      managers_[pri]->add(FunctionRunner::create(std::move(f)), 0, 0, source);
+    }
   }
 
   KeepAlive<> getKeepAlive(ExecutionScope es, Source source) const override {
@@ -1204,7 +1296,12 @@ class PriorityThreadManager::PriorityImpl
    * Implements folly::Executor::add()
    */
   void add(folly::Func f) override {
-    add(FunctionRunner::create(std::move(f)));
+    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
+      managers_[PRIORITY::NORMAL]->addFunc(
+          0, std::move(f), 0, Source::INTERNAL);
+    } else {
+      add(FunctionRunner::create(std::move(f)));
+    }
   }
 
   /**
@@ -1218,7 +1315,11 @@ class PriorityThreadManager::PriorityImpl
    */
   void addWithPriority(folly::Func f, int8_t priority) override {
     auto prio = translatePriority(priority);
-    add(prio, FunctionRunner::create(std::move(f)));
+    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
+      managers_[prio]->addFunc(0, std::move(f), 0, Source::INTERNAL);
+    } else {
+      add(prio, FunctionRunner::create(std::move(f)));
+    }
   }
 
   template <typename T>
@@ -1334,7 +1435,7 @@ class PriorityThreadManager::PriorityImpl
         pri, source, this);
   }
 
-  std::unique_ptr<ThreadManager> managers_[N_PRIORITIES];
+  std::unique_ptr<ThreadManager::Impl> managers_[N_PRIORITIES];
   size_t counts_[N_PRIORITIES];
   mutable std::mutex mutex_;
   std::vector<std::unique_ptr<Executor, Deleter>> executors_;
@@ -1380,12 +1481,20 @@ class PriorityQueueThreadManager : public ThreadManager::Impl {
     // and we want to prioritize inflight requests over admitting new request.
     // arguably, we may even want a priority above the max we ever allow for
     // initial queueing
-    ThreadManager::Impl::add(
-        PRIORITY::HIGH_IMPORTANT,
-        std::make_shared<FunctionRunner>(std::move(f)),
-        0,
-        0,
-        apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
+    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
+      ThreadManager::Impl::addFunc(
+          PRIORITY::HIGH_IMPORTANT,
+          std::move(f),
+          0,
+          apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
+    } else {
+      ThreadManager::Impl::add(
+          PRIORITY::HIGH_IMPORTANT,
+          std::make_shared<FunctionRunner>(std::move(f)),
+          0,
+          0,
+          apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
+    }
   }
 
   /**
@@ -1393,12 +1502,20 @@ class PriorityQueueThreadManager : public ThreadManager::Impl {
    */
   void addWithPriority(folly::Func f, int8_t priority) override {
     auto prio = translatePriority(priority);
-    ThreadManager::Impl::add(
-        prio,
-        std::make_shared<FunctionRunner>(std::move(f)),
-        0,
-        0,
-        apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
+    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
+      ThreadManager::Impl::addFunc(
+          prio,
+          std::move(f),
+          0,
+          apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
+    } else {
+      ThreadManager::Impl::add(
+          prio,
+          std::make_shared<FunctionRunner>(std::move(f)),
+          0,
+          0,
+          apache::thrift::concurrency::ThreadManager::Source::INTERNAL);
+    }
   }
 
   uint8_t getNumPriorities() const override { return N_PRIORITIES; }
@@ -1409,7 +1526,11 @@ class PriorityQueueThreadManager : public ThreadManager::Impl {
   }
 
   void addWithPriorityAndSource(folly::Func f, PRIORITY pri, Source source) {
-    add(pri, std::make_shared<FunctionRunner>(std::move(f)), 0, 0, source);
+    if (FLAGS_thrift_thread_manager_direct_func_enabled) {
+      addFunc(pri, std::move(f), 0, source);
+    } else {
+      add(pri, std::make_shared<FunctionRunner>(std::move(f)), 0, 0, source);
+    }
   }
 
   KeepAlive<> getKeepAlive(ExecutionScope es, Source source) const override {

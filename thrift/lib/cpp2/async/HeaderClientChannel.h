@@ -243,7 +243,8 @@ class HeaderClientChannel : public ClientChannel,
     std::tuple<
         std::unique_ptr<folly::IOBuf>,
         size_t,
-        std::unique_ptr<apache::thrift::transport::THeader>>
+        std::unique_ptr<apache::thrift::transport::THeader>,
+        size_t>
     removeFrame(folly::IOBufQueue* q) override;
 
     std::unique_ptr<folly::IOBuf> addFrame(

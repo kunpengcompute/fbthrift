@@ -61,8 +61,9 @@ TEST(THeaderTest, largetransform) {
   queue2->append(queue->move());
 
   size_t needed;
+  size_t frameLength;
 
-  buf = header.removeHeader(queue2.get(), needed, persistentHeaders);
+  buf = header.removeHeader(queue2.get(), needed, persistentHeaders, frameLength);
   EXPECT_EQ(buf->computeChainDataLength(), 10000000);
 }
 
@@ -99,17 +100,19 @@ TEST(THeaderTest, eraseReadHeader) {
 TEST(THeaderTest, removeHeaderNullptrQueue) {
   THeader header;
   size_t needed;
+  size_t frameLength;
   THeader::StringToStringMap persistentHeaders;
-  EXPECT_EQ(nullptr, header.removeHeader(nullptr, needed, persistentHeaders));
+  EXPECT_EQ(nullptr, header.removeHeader(nullptr, needed, persistentHeaders, frameLength));
   EXPECT_EQ(4, needed);
 }
 
 TEST(THeaderTest, removeHeaderEmptyQueue) {
   THeader header;
   size_t needed;
+  size_t frameLength;
   THeader::StringToStringMap persistentHeaders;
   IOBufQueue queue(IOBufQueue::cacheChainLength());
-  EXPECT_EQ(nullptr, header.removeHeader(&queue, needed, persistentHeaders));
+  EXPECT_EQ(nullptr, header.removeHeader(&queue, needed, persistentHeaders, frameLength));
   EXPECT_EQ(4, needed);
 }
 
@@ -167,8 +170,9 @@ void testAsciiHeaderData(const std::string& data, const std::string& expected) {
   queue->append(std::move(buf));
 
   size_t needed;
+  size_t frameLength;
   try {
-    buf = header.removeHeader(queue.get(), needed, persistentHeaders);
+    buf = header.removeHeader(queue.get(), needed, persistentHeaders, frameLength);
     ASSERT_TRUE(false);
   } catch (TTransportException& e) {
     ASSERT_EQ(e.what(), expected);

@@ -16,6 +16,15 @@
 
 #include <thrift/lib/cpp/transport/THeader.h>
 
+static size_t getQueueLength(const folly::IOBufQueue* queue) {
+  if (!queue || queue->empty()) {
+    return 0;
+  }
+  return queue->options().cacheChainLength
+      ? queue->chainLength()
+      : queue->front()->computeChainDataLength();
+}
+
 #include <fmt/core.h>
 #include <folly/Conv.h>
 #include <folly/ExceptionString.h>
@@ -278,18 +287,15 @@ unique_ptr<IOBuf> THeader::removeNonHeader(
 unique_ptr<IOBuf> THeader::removeHeader(
     IOBufQueue* queue,
     size_t& needed,
-    StringToStringMap& persistentReadHeaders) {
+    StringToStringMap& persistentReadHeaders,
+    size_t& frameLength) {
+  frameLength = 0;
   if (!queue || queue->empty()) {
     needed = 4;
     return nullptr;
   }
   Cursor c(queue->front());
-  size_t remaining;
-  if (queue->options().cacheChainLength) {
-    remaining = queue->chainLength();
-  } else {
-    remaining = queue->front()->computeChainDataLength();
-  }
+  size_t remaining = getQueueLength(queue);
   size_t frameSizeBytes = 4;
   needed = 0;
 
@@ -311,6 +317,7 @@ unique_ptr<IOBuf> THeader::removeHeader(
     unique_ptr<IOBuf> buf =
         THeader::removeNonHeader(queue, needed, clientType_, sz32);
     if (buf) {
+      frameLength = remaining + frameSizeBytes - getQueueLength(queue);
       return buf;
     }
   }
@@ -318,7 +325,12 @@ unique_ptr<IOBuf> THeader::removeHeader(
   auto clientT = THeader::analyzeFirst32bit(sz32);
   if (clientT) {
     clientType_ = *clientT;
-    return THeader::removeNonHeader(queue, needed, *clientT, sz32);
+    unique_ptr<IOBuf> buf =
+        THeader::removeNonHeader(queue, needed, *clientT, sz32);
+    if (buf) {
+      frameLength = remaining + frameSizeBytes - getQueueLength(queue);
+    }
+    return buf;
   }
 
   size_t sz;
@@ -380,6 +392,7 @@ unique_ptr<IOBuf> THeader::removeHeader(
   unique_ptr<IOBuf> buf =
       THeader::removeNonHeader(queue, needed, clientType_, sz);
   if (buf) {
+    frameLength = remaining + frameSizeBytes - getQueueLength(queue);
     return buf;
   }
 
@@ -401,6 +414,7 @@ unique_ptr<IOBuf> THeader::removeHeader(
   // Trim off the frame size.
   queue->trimStart(frameSizeBytes);
   buf = readHeaderFormat(queue->split(sz), persistentReadHeaders);
+  frameLength = frameSizeBytes + sz;
 
   return buf;
 }

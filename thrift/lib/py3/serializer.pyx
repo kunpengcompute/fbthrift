@@ -75,9 +75,11 @@ def deserialize_from_header(structKlass, buf not None):
     cdef cTHeader header
     cdef F14NodeMap[string, string] pheaders
     cdef size_t needed = 0
+    cdef size_t frame_length = 0
     cdef unique_ptr[cIOBuf] cbuf
     try:
-        cbuf = _fbthrift_iobuf.move(header.removeHeader(&queue, needed, pheaders))
+        cbuf = _fbthrift_iobuf.move(
+            header.removeHeader(&queue, needed, pheaders, frame_length))
     except Exception as e:
         raise Error.__new__(Error, *e.args) from None
     if cbuf == NULL:

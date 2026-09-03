@@ -299,7 +299,8 @@ class THeader final {
   std::unique_ptr<folly::IOBuf> removeHeader(
       folly::IOBufQueue*,
       size_t& needed,
-      StringToStringMap& persistentReadHeaders);
+      StringToStringMap& persistentReadHeaders,
+      size_t& frameLength);
 
   void setDesiredCompressionConfig(CompressionConfig compressionConfig) {
     compressionConfig_ = compressionConfig;

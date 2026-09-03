@@ -650,12 +650,10 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
    */
   std::shared_ptr<concurrency::ThreadManager> getThreadManager_deprecated()
       const override {
-    std::lock_guard<std::mutex> lock(threadManagerMutex_);
     return tmLoggingWrapper_;
   }
 
   std::shared_ptr<folly::Executor> getThreadManager() const override {
-    std::lock_guard<std::mutex> lock(threadManagerMutex_);
     return threadManager_;
   }
 
@@ -672,7 +670,6 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
           .sharedPtrExecutor()
           .value();
     }
-    std::lock_guard<std::mutex> lock(threadManagerMutex_);
     return threadManager_;
   }
 
@@ -684,7 +681,6 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
           .value()
           .get();
     }
-    std::lock_guard<std::mutex> lock(threadManagerMutex_);
     return threadManager_.get();
   }
 

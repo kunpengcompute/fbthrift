@@ -1034,7 +1034,6 @@ std::unique_ptr<ThreadManager::Task> ThreadManager::Impl::waitOnTask() {
   }
 
   // Otherwise, no tasks on the horizon, so go sleep
-  std::unique_lock<std::mutex> l(mutex_);
   if (shouldStop()) {
     // check again because it might have changed by the time we got the mutex
     return nullptr;
@@ -1042,11 +1041,9 @@ std::unique_ptr<ThreadManager::Task> ThreadManager::Impl::waitOnTask() {
 
   ++idleCount_;
   --totalTaskCount_;
-  l.unlock();
   while (!tasks_.try_dequeue(task)) {
     waitSem_.wait();
     if (shouldStop()) {
-      std::unique_lock<std::mutex> l2(mutex_);
       --idleCount_;
       ++totalTaskCount_;
       return nullptr;

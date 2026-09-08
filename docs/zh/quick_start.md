@@ -24,7 +24,6 @@ cd "$ACCLIB"
 - [fb_folly_autobuild](https://gitcode.com/boostkit/AccLibBenchmark/tree/master/fb_folly_autobuild)：存放`install.py`自动构建脚本、`run.py`性能矩阵脚本及使用说明。
 
 ```text
-由于AccLibBenchmark作为压测工具的代码汇总，我们拉取后，只应用其中的fbthrift_folly_benchmark压测工具，以及fb_folly_autobuild的自动化脚本。
 
 AccLibBenchmark/
 ├── fbthrift_folly_benchmark/
@@ -38,7 +37,8 @@ AccLibBenchmark/
     └── run.py
 ```
 
-> **优化补丁：**使用脚本安装时,默认拉取优化代码版本，若基于开源仓需要代码补丁，请将补丁仓master分支下的`fbthrift_folly.patch`放在`fb_folly_autobuild/`目录下，脚本支持自动补全补丁。
+由于AccLibBenchmark作为压测工具的代码汇总，我们拉取后，只应用其中的`fbthrift_folly_benchmark`压测工具，以及`fb_folly_autobuild`的自动化脚本，如上图所示。
+> **说明：**使用脚本安装时,默认拉取优化代码版本，若基于开源仓需要代码补丁，请将补丁仓master分支下的`fbthrift_folly.patch`放在`fb_folly_autobuild/`目录下，脚本支持自动补全补丁。
 
 ## 2. 编译环境
 
@@ -73,20 +73,20 @@ AccLibBenchmark/
   openssl openssl-devel
   ```
 
-Folly需要使用Snappy 1.1.8及以上版本的动态库。系统依赖安装完成后，执行以下命令确认Snappy版本及`libsnappy.so`动态库路径。
+- Folly需要使用Snappy 1.1.8及以上版本的动态库。系统依赖安装完成后，执行以下命令确认Snappy版本及`libsnappy.so`动态库路径。
 
-```bash
-pkg-config --modversion snappy
-ldconfig -p | grep 'libsnappy\.so'
-```
-
-如果Snappy版本低于1.1.8、仅安装了静态库，或者Folly与Benchmark实际加载了不同版本的`libsnappy.so`，后续编译Benchmark时可能出现以下错误。
-
-```text
-undefined symbol: _ZTIN6snappy6sourceE
-```
-
-出现该错误时，应先升级Snappy动态库并确保Folly与Benchmark使用同一版本，然后重新编译Folly和Benchmark。
+  ```bash
+  pkg-config --modversion snappy
+  ldconfig -p | grep 'libsnappy\.so'
+  ```
+  
+  如果Snappy版本低于1.1.8、仅安装了静态库，或者Folly与Benchmark实际加载了不同版本的`libsnappy.so`，后续编译Benchmark时可能出现以下错误。
+  
+  ```text
+  undefined symbol: _ZTIN6snappy6sourceE
+  ```
+  
+  出现该错误时，应先升级Snappy动态库并确保Folly与Benchmark使用同一版本，然后重新编译Folly和Benchmark。
 
 ### 2.2 准备Clang 16
 
@@ -212,7 +212,7 @@ $BENCH/build/press_client
 
 ### 3.7 查看最终目录结构
 
-全部组件和Benchmark编译完成后，目录关系如下。
+全部组件和Benchmark编译完成后，相关目录结构如下。
 
 ```text
 $WORK/
@@ -301,7 +301,7 @@ export LD_LIBRARY_PATH="$INS/fbthrift/lib:$INS/fbthrift/lib64:$INS/wangle/lib:$I
    test -f run.py
    ```
 
-如第一章所言，`fbthrift_folly.patch`仅在需要由FbThrift v1.1.0发布包提供并放到当前目录。
+如[第一章](#1-创建工作目录并获取公共Benchmark仓库)所言，`fbthrift_folly.patch`仅在需要由FbThrift v1.1.0发布包提供并放到当前目录。
 
 ### 4.2 适配公共仓库目录
 

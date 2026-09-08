@@ -38,7 +38,7 @@ AccLibBenchmark/
 ```
 
 由于AccLibBenchmark作为压测工具的代码汇总，我们拉取后，只应用其中的`fbthrift_folly_benchmark`压测工具，以及`fb_folly_autobuild`的自动化脚本，如上图所示。
-> **说明：**使用脚本安装时,默认拉取优化代码版本，若基于开源仓需要代码补丁，请将补丁仓master分支下的`fbthrift_folly.patch`放在`fb_folly_autobuild/`目录下，脚本支持自动补全补丁。
+> **说明:** 使用脚本安装时,默认拉取优化代码版本，若基于开源仓需要代码补丁，请将补丁仓master分支下的`fbthrift_folly.patch`放在`fb_folly_autobuild/`目录下，脚本支持自动补全补丁。
 
 ## 2. 编译环境
 

@@ -51,7 +51,12 @@ void FramingHandler::read(Context* ctx, folly::IOBufQueue& q) {
       if (strict_) {
         readSize = readBufferSize_;
       } else {
-        readSize = std::clamp(avgRequestSize_ * kReadBufferMultiplier, size_t{2048}, size_t{524288});
+        // Clamp before multiplying so large frame lengths cannot wrap.
+        readSize = std::clamp(
+                       avgRequestSize_,
+                       size_t{2048} / kReadBufferMultiplier,
+                       size_t{524288} / kReadBufferMultiplier) *
+            kReadBufferMultiplier;
       }
       size_t remainLen = std::max(remaining, q.tailroom());
       ctx->setReadBufferSettings(readSize, remainLen > 0 ? remainLen : readSize);
@@ -61,8 +66,16 @@ void FramingHandler::read(Context* ctx, folly::IOBufQueue& q) {
       refreshReadBuffer();
       return;
     } else {
-      avgRequestSize_ = (avgRequestSize_ == 0) ? frameLength :
-          (avgRequestSize_ * (kAvgWindowSamples - 1) + frameLength) / kAvgWindowSamples;
+      if (avgRequestSize_ == 0) {
+        avgRequestSize_ = frameLength;
+      } else if (frameLength >= avgRequestSize_) {
+        avgRequestSize_ += (frameLength - avgRequestSize_) / kAvgWindowSamples;
+      } else {
+        const size_t delta = avgRequestSize_ - frameLength;
+        // Preserve floor((9 * average + frameLength) / 10) without overflow.
+        avgRequestSize_ -=
+            delta / kAvgWindowSamples + (delta % kAvgWindowSamples != 0);
+      }
       refreshReadBuffer();
       ctx->fireRead(std::make_pair(std::move(unframed), std::move(header)));
     }

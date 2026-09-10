@@ -285,6 +285,7 @@ void HeaderClientChannel::sendRequestResponse(
     SerializedRequest&& serializedRequest,
     std::shared_ptr<THeader> header,
     RequestClientCallback::Ptr cb) {
+  CHECK(cb) << "Request-response callback must not be null";
   preprocessHeader(header.get());
 
   auto buf = LegacySerializedRequest(
@@ -292,9 +293,6 @@ void HeaderClientChannel::sendRequestResponse(
                  methodMetadata.name_view(),
                  std::move(serializedRequest))
                  .buffer;
-
-  // cb is not allowed to be null.
-  DCHECK(cb);
 
   DestructorGuard dg(this);
 
@@ -515,6 +513,7 @@ void HeaderClientChannel::RocketUpgradeChannel::sendRequestResponse(
     SerializedRequest&& serializedRequest,
     std::shared_ptr<apache::thrift::transport::THeader> header,
     RequestClientCallback::Ptr cb) {
+  CHECK(cb) << "Request-response callback must not be null";
   preprocessHeader(header.get());
 
   initUpgradeIfNeeded(rpcOptions);

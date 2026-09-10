@@ -306,6 +306,8 @@ class ThreadManager : public virtual folly::Executor {
     std::optional<uint32_t> tenant_id_;
   };
 
+  // Built-in managers use NORMAL for an unspecified (N_PRIORITIES) priority
+  // and reject other out-of-range priority/source values with invalid_argument.
   [[nodiscard]] virtual KeepAlive<> getKeepAlive(
       ExecutionScope es, Source level) const = 0;
 

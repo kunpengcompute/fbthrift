@@ -29,6 +29,7 @@ static size_t getQueueLength(const folly::IOBufQueue* queue) {
 #include <folly/Conv.h>
 #include <folly/ExceptionString.h>
 #include <folly/MapUtil.h>
+#include <folly/ScopeGuard.h>
 #include <folly/String.h>
 #include <folly/compression/Compression.h>
 #include <folly/io/Cursor.h>
@@ -45,8 +46,12 @@ static size_t getQueueLength(const folly::IOBufQueue* queue) {
 #include <thrift/lib/cpp2/protocol/Serializer.h>
 #include <thrift/lib/cpp2/transport/rocket/framing/Util.h>
 
+#include <zlib.h>
+#include <zstd.h>
 #include <algorithm>
+#include <array>
 #include <cassert>
+#include <stdexcept>
 #include <string>
 
 using std::map;
@@ -419,42 +424,85 @@ unique_ptr<IOBuf> THeader::removeHeader(
   return buf;
 }
 
-static string getString(RWPrivateCursor& c, size_t sz) {
-  if (!c.canAdvance(sz)) {
+namespace {
+[[noreturn]] void headerLimitExceeded(const char* message) {
+  throw TTransportException(TTransportException::INVALID_FRAME_SIZE, message);
+}
+
+// Non-owning staging: keys/values refer to the bounded metadata buffer or the
+// old persistent map. Owning strings are allocated only after all quotas pass.
+using HeaderViews = std::map<std::string_view, std::string_view>;
+
+void setHeaderView(
+    HeaderViews& headers,
+    uint64_t& bytes,
+    std::string_view key,
+    std::string_view value,
+    uint64_t maxBytes,
+    size_t maxEntries) {
+  auto it = headers.find(key);
+  const bool replacing = it != headers.end();
+  const uint64_t base =
+      replacing ? bytes - it->first.size() - it->second.size() : bytes;
+  if ((!replacing && headers.size() >= maxEntries) || base > maxBytes ||
+      key.size() > maxBytes - base ||
+      value.size() > maxBytes - base - key.size()) {
+    headerLimitExceeded("Header key/value budget exceeded");
+  }
+  if (replacing) {
+    it->second = value;
+  } else {
+    headers.emplace(key, value);
+  }
+  bytes = base + key.size() + value.size();
+}
+
+std::string_view readHeaderString(Cursor& c) {
+  const auto size = readVarint<uint32_t>(c);
+  if (!c.canAdvance(size)) {
     throw TTransportException(
         TTransportException::CORRUPTED_DATA,
-        folly::stringPrintf(
-            "String size %zu is larger than available %zu bytes",
-            sz,
-            c.totalLength()));
+        "Header string extends beyond declared header region");
   }
-  string str(sz, '\0');
-  c.pull(&str[0], sz);
-  return str;
+  // The metadata-only buffer is contiguous, never the unbounded payload.
+  std::string_view result(reinterpret_cast<const char*>(c.data()), size);
+  c.skip(size);
+  return result;
 }
 
-/**
- * Reads a string from ptr, taking care not to reach headerBoundary
- * Advances ptr on success
- *
- * @param RWPrivateCursor        cursor to read from
- */
-static string readString(RWPrivateCursor& c) {
-  return getString(c, readVarint<uint32_t>(c));
+void readInfoHeaders(
+    Cursor& c,
+    HeaderViews& headers,
+    uint64_t& bytes,
+    uint64_t maxBytes,
+    size_t maxEntries) {
+  auto count = readVarint<uint32_t>(c);
+  if (count > c.totalLength() / 2) {
+    throw TTransportException(
+        TTransportException::CORRUPTED_DATA, "Truncated Header key/value list");
+  }
+  while (count--) {
+    const auto key = readHeaderString(c);
+    const auto value = readHeaderString(c);
+    setHeaderView(headers, bytes, key, value, maxBytes, maxEntries);
+  }
 }
 
-static void readInfoHeaders(
-    RWPrivateCursor& c, THeader::StringToStringMap& headers_) {
-  // Process key-value headers
-  uint32_t numKVHeaders = readVarint<int32_t>(c);
-  // continue until we reach (paded) end of packet
-  while (numKVHeaders--) {
-    // format: key; value
-    // both: length (varint32); value (string)
-    string key = readString(c);
-    string value = readString(c);
-    // save to headers
-    headers_[key] = value;
+THeader::StringToStringMap materializeHeaders(const HeaderViews& views) {
+  THeader::StringToStringMap result;
+  result.reserve(views.size());
+  for (const auto& entry : views) {
+    result.emplace(std::string(entry.first), std::string(entry.second));
+  }
+  return result;
+}
+} // namespace
+
+void THeader::ReadLimits::validate() const {
+  // Restrict windowLog to the portable ZSTD range; zero is never "unlimited".
+  if (!maxUncompressedBytes || !maxDecompressionWorkBytes ||
+      zstdWindowLogMax < 10 || zstdWindowLogMax > 30 || !maxHeaderBytes) {
+    throw std::invalid_argument("Invalid Header receive limits");
   }
 }
 
@@ -466,34 +514,66 @@ unique_ptr<IOBuf> THeader::readHeaderFormat(
   // magic(4), seqId(2), flags(2), headerSize(2)
   const uint8_t commonHeaderSize = 10;
 
-  RWPrivateCursor c(buf.get());
+  Cursor frame(buf.get());
 
   // skip over already processed magic(4), seqId(4), headerSize(2)
-  c += commonHeaderSize - 2; // advance to headerSize field
+  frame += commonHeaderSize - 2; // advance to headerSize field
   // On the wire, headerSize is in 4 byte words.  See HeaderFormat.txt
-  uint32_t headerSize = 4 * c.readBE<uint16_t>() + commonHeaderSize;
+  uint32_t headerSize = 4 * frame.readBE<uint16_t>() + commonHeaderSize;
   if (headerSize > buf->computeChainDataLength()) {
     throw TTransportException(
         TTransportException::INVALID_FRAME_SIZE,
         "Header size is larger than frame");
   }
-  Cursor data(buf.get());
-  data += headerSize;
-  protoId_ = readVarint<uint16_t>(c);
+  if (headerSize - commonHeaderSize > readLimits_.maxHeaderBytes) {
+    headerLimitExceeded("Header metadata budget exceeded");
+  }
+  // Clone ONLY the declared metadata region before coalescing. Every varint,
+  // key and value is now bounded independently of the following RPC payload.
+  std::unique_ptr<IOBuf> metadata;
+  frame.clone(metadata, headerSize - commonHeaderSize);
+  metadata->coalesce();
+  Cursor c(metadata.get());
+  const auto protocol = readVarint<uint16_t>(c);
   uint16_t numTransforms = readVarint<uint16_t>(c);
-  readTrans_.reserve(numTransforms);
-
-  uint16_t macSz = 0;
+  if (numTransforms > readLimits_.maxTransforms) {
+    headerLimitExceeded("Too many incoming Header transforms");
+  }
+  std::vector<uint16_t> transforms;
+  transforms.reserve(numTransforms);
+  auto writeTransforms = writeTrans_;
 
   // For now all transforms consist of only the ID, not data.
   for (int i = 0; i < numTransforms; i++) {
-    int32_t transId = readVarint<int32_t>(c);
-    readTrans_.push_back(transId);
-    setTransform(transId);
+    const auto transId = readVarint<uint32_t>(c);
+    if (transId != ZLIB_TRANSFORM && transId != ZSTD_TRANSFORM) {
+      throw TApplicationException(
+          TApplicationException::MISSING_RESULT, "Unknown Header transform");
+    }
+    transforms.push_back(transId);
+    if (std::find(writeTransforms.begin(), writeTransforms.end(), transId) ==
+        writeTransforms.end()) {
+      writeTransforms.push_back(transId);
+    }
   }
 
+  HeaderViews persistent;
+  uint64_t persistentBytes = 0;
+  for (const auto& entry : persistentReadHeaders) {
+    setHeaderView(
+        persistent,
+        persistentBytes,
+        entry.first,
+        entry.second,
+        readLimits_.maxPersistentHeaderBytes,
+        readLimits_.maxPersistentHeaders);
+  }
+  HeaderViews request;
+  uint64_t requestBytes = 0;
+  bool persistentUpdated = false;
+
   // Info headers
-  while (data.data() != c.data()) {
+  while (!c.isAtEnd()) {
     uint32_t infoId = readVarint<int32_t>(c);
 
     if (infoId == 0) {
@@ -506,25 +586,43 @@ unique_ptr<IOBuf> THeader::readHeaderFormat(
     }
     switch (infoId) {
       case infoIdType::KEYVALUE:
-        readInfoHeaders(c, ensureReadHeaders());
+        readInfoHeaders(
+            c,
+            request,
+            requestBytes,
+            readLimits_.maxReadHeaderBytes,
+            readLimits_.maxReadHeaders);
         break;
       case infoIdType::PKEYVALUE:
-        readInfoHeaders(c, persistentReadHeaders);
+        readInfoHeaders(
+            c,
+            persistent,
+            persistentBytes,
+            readLimits_.maxPersistentHeaderBytes,
+            readLimits_.maxPersistentHeaders);
+        persistentUpdated = true;
         break;
     }
   }
 
   // if persistent headers are not empty, merge together.
-  if (!persistentReadHeaders.empty()) {
-    ensureReadHeaders().insert(
-        persistentReadHeaders.begin(), persistentReadHeaders.end());
+  for (const auto& entry : persistent) {
+    // Per-request headers retain precedence over persistent headers.
+    if (request.find(entry.first) == request.end()) {
+      setHeaderView(
+          request,
+          requestBytes,
+          entry.first,
+          entry.second,
+          readLimits_.maxReadHeaderBytes,
+          readLimits_.maxReadHeaders);
+    }
   }
 
   // Get just the data section using trim on a queue
   unique_ptr<IOBufQueue> msg(new IOBufQueue);
   msg->append(std::move(buf));
   msg->trimStart(headerSize);
-  msg->trimEnd(macSz);
 
   buf = msg->move();
   // msg->move() can return an empty pointer if all the data is
@@ -534,48 +632,182 @@ unique_ptr<IOBuf> THeader::readHeaderFormat(
   }
 
   // Untransform data section
-  buf = untransform(std::move(buf), readTrans_);
+  buf = untransform(std::move(buf), transforms, readLimits_);
 
-  if (protoId_ == T_JSON_PROTOCOL && clientType_ != THRIFT_HTTP_SERVER_TYPE) {
+  if (protocol == T_JSON_PROTOCOL && clientType_ != THRIFT_HTTP_SERVER_TYPE) {
     throw TApplicationException(
         TApplicationException::UNSUPPORTED_CLIENT_TYPE,
         "Client is trying to send JSON without HTTP");
   }
 
+  // Both materializations must succeed before publishing any persistent state.
+  auto newReadHeaders = materializeHeaders(request);
+  auto newPersistent =
+      persistentUpdated ? materializeHeaders(persistent) : StringToStringMap{};
+  readHeaders_.emplace(std::move(newReadHeaders));
+  if (persistentUpdated) {
+    persistentReadHeaders.swap(newPersistent);
+  }
+  protoId_ = protocol;
+  readTrans_ = std::move(transforms);
+  writeTrans_ = std::move(writeTransforms);
+
   return buf;
 }
 
-static unique_ptr<IOBuf> decompressCodec(
-    const IOBuf& buf, folly::io::CodecType codec) {
-  try {
-    return folly::io::getCodec(codec)->uncompress(&buf);
-  } catch (const std::exception& e) {
-    throw TApplicationException(
-        TApplicationException::MISSING_RESULT,
-        folly::exceptionStr(e).toStdString());
+namespace {
+[[noreturn]] void invalidCompressedHeader(const char* message) {
+  throw TApplicationException(TApplicationException::MISSING_RESULT, message);
+}
+
+struct DecodeProgress {
+  size_t consumed;
+  size_t produced;
+  bool done;
+};
+
+template <typename Step>
+unique_ptr<IOBuf> decompressBounded(
+    const IOBuf& buf,
+    const THeader::ReadLimits& limits,
+    uint64_t& workRemaining,
+    Step&& step) {
+  const auto inputSize = buf.computeChainDataLength();
+  if (inputSize > workRemaining) {
+    headerLimitExceeded("Header decompression work budget exceeded");
+  }
+  // Charge all compressed input once per layer, in addition to actual output.
+  workRemaining -= inputSize;
+  uint64_t outputRemaining = limits.maxUncompressedBytes;
+  Cursor input(&buf);
+  IOBufQueue result;
+  std::array<uint8_t, 16384> scratch;
+  uint8_t probe;
+  while (true) {
+    auto bytes = input.peekBytes();
+    const auto capacity = std::min<uint64_t>(
+        scratch.size(), std::min(outputRemaining, workRemaining));
+    // At the exact limit, allow the codec to consume its trailer without a new
+    // heap allocation. One output byte in this stack probe proves overflow.
+    auto progress = step(
+        bytes, capacity ? scratch.data() : &probe, capacity ? capacity : 1);
+    if (progress.produced > capacity) {
+      headerLimitExceeded("Header decompression output/work budget exceeded");
+    }
+    outputRemaining -= progress.produced;
+    workRemaining -= progress.produced;
+    // Budget checked BEFORE allocating any output IOBuf. Codec frame content
+    // sizes never control an allocation, including unknown-length ZSTD frames.
+    if (progress.produced) {
+      result.append(IOBuf::copyBuffer(scratch.data(), progress.produced));
+    }
+    input.skip(progress.consumed);
+    if (progress.done) {
+      if (!input.isAtEnd()) {
+        invalidCompressedHeader("Trailing data after compressed Header frame");
+      }
+      auto output = result.move();
+      return output ? std::move(output) : IOBuf::create(0);
+    }
+    if (!progress.consumed && !progress.produced) {
+      invalidCompressedHeader("Truncated or invalid compressed Header frame");
+    }
   }
 }
 
+unique_ptr<IOBuf> decompressCodec(
+    const IOBuf& buf,
+    uint16_t transform,
+    const THeader::ReadLimits& limits,
+    uint64_t& workRemaining) {
+  // Reject an exhausted input budget even before creating codec state.
+  if (buf.computeChainDataLength() > workRemaining) {
+    headerLimitExceeded("Header decompression work budget exceeded");
+  }
+  if (transform == THeader::ZLIB_TRANSFORM) {
+    z_stream stream{};
+    if (inflateInit(&stream) != Z_OK) {
+      invalidCompressedHeader("Cannot initialize Header zlib decoder");
+    }
+    auto cleanup = folly::makeGuard([&] { inflateEnd(&stream); });
+    return decompressBounded(
+        buf,
+        limits,
+        workRemaining,
+        [&](ByteRange input, uint8_t* output, size_t capacity) {
+          const auto inputSize =
+              std::min<size_t>(input.size(), std::numeric_limits<uInt>::max());
+          stream.next_in = const_cast<Bytef*>(input.data());
+          stream.avail_in = inputSize;
+          stream.next_out = output;
+          stream.avail_out = capacity;
+          const auto status = inflate(&stream, Z_NO_FLUSH);
+          if (status != Z_OK && status != Z_STREAM_END &&
+              status != Z_BUF_ERROR) {
+            invalidCompressedHeader("Invalid Header zlib data");
+          }
+          return DecodeProgress{
+              inputSize - stream.avail_in,
+              capacity - stream.avail_out,
+              status == Z_STREAM_END};
+        });
+  }
+  std::unique_ptr<ZSTD_DStream, decltype(&ZSTD_freeDStream)> stream(
+      ZSTD_createDStream(), &ZSTD_freeDStream);
+  if (!stream || ZSTD_isError(ZSTD_initDStream(stream.get())) ||
+      ZSTD_isError(ZSTD_DCtx_setParameter(
+          stream.get(), ZSTD_d_windowLogMax, limits.zstdWindowLogMax))) {
+    invalidCompressedHeader("Cannot initialize bounded Header ZSTD decoder");
+  }
+  return decompressBounded(
+      buf,
+      limits,
+      workRemaining,
+      [&](ByteRange input, uint8_t* output, size_t capacity) {
+        ZSTD_inBuffer in{input.data(), input.size(), 0};
+        ZSTD_outBuffer out{output, capacity, 0};
+        const auto status = ZSTD_decompressStream(stream.get(), &out, &in);
+        if (ZSTD_isError(status)) {
+          invalidCompressedHeader(ZSTD_getErrorName(status));
+        }
+        return DecodeProgress{in.pos, out.pos, status == 0};
+      });
+}
+} // namespace
+
 unique_ptr<IOBuf> THeader::untransform(
     unique_ptr<IOBuf> buf, std::vector<uint16_t>& readTrans) {
+  return untransform(std::move(buf), readTrans, ReadLimits{});
+}
+
+unique_ptr<IOBuf> THeader::untransform(
+    unique_ptr<IOBuf> buf,
+    std::vector<uint16_t>& readTrans,
+    const ReadLimits& limits) {
+  limits.validate();
+  if (readTrans.size() > limits.maxTransforms) {
+    headerLimitExceeded("Too many incoming Header transforms");
+  }
+  uint64_t workRemaining = limits.maxDecompressionWorkBytes;
   for (vector<uint16_t>::const_reverse_iterator it = readTrans.rbegin();
        it != readTrans.rend();
        ++it) {
-    using folly::io::CodecType;
     const uint16_t transId = *it;
 
     switch (transId) {
       case ZLIB_TRANSFORM:
-        buf = decompressCodec(*buf, CodecType::ZLIB);
-        break;
       case ZSTD_TRANSFORM:
-        buf = decompressCodec(*buf, CodecType::ZSTD);
+        buf = decompressCodec(*buf, transId, limits, workRemaining);
         break;
       default:
         throw TApplicationException(
             TApplicationException::MISSING_RESULT,
             fmt::format("Unknown transform: {}", transId));
     }
+  }
+
+  if (buf->computeChainDataLength() > limits.maxUncompressedBytes) {
+    headerLimitExceeded("Header payload budget exceeded");
   }
 
   return buf;
@@ -833,6 +1065,8 @@ unique_ptr<IOBuf> THeader::addHeader(
   std::vector<uint16_t> writeTrans = writeTrans_;
 
   if (clientType_ == THRIFT_HEADER_CLIENT_TYPE) {
+    // Validate before applying transforms or computing the output allocation.
+    getNumTransforms(writeTrans);
     if (transform) {
       buf = THeader::transform(std::move(buf), writeTrans);
     }
@@ -861,7 +1095,7 @@ unique_ptr<IOBuf> THeader::addHeader(
   if (clientType_ == THRIFT_HEADER_CLIENT_TYPE) {
     // header size will need to be updated at the end because of varints.
     // Make it big enough here for max varint size, plus 4 for padding.
-    int headerSize =
+    size_t headerSize =
         (2 + getNumTransforms(writeTrans) * 2 /* transform data */) * 5 + 4;
     // add approximate size of info headers
     headerSize += getMaxWriteHeadersSize(persistentWriteHeaders);
@@ -923,6 +1157,11 @@ unique_ptr<IOBuf> THeader::addHeader(
     headerSize = (pkt - headerStart);
     uint8_t padding = 4 - (headerSize % 4);
     headerSize += padding;
+    if (headerSize / 4 > std::numeric_limits<uint16_t>::max()) {
+      throw TTransportException(
+          TTransportException::INVALID_FRAME_SIZE,
+          "Header metadata exceeds the 16-bit word count");
+    }
 
     // Pad out pkt with 0x00
     for (int i = 0; i < padding; i++) {

@@ -23,6 +23,7 @@
 #include <mutex>
 #include <queue>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <variant>
 
@@ -61,6 +62,27 @@ namespace thrift {
 namespace concurrency {
 
 namespace {
+size_t checkedExecutorIndex(PRIORITY priority, ThreadManager::Source source) {
+  // N_PRIORITIES represents an unspecified priority, not an executor slot.
+  if (priority == PRIORITY::N_PRIORITIES) {
+    priority = PRIORITY::NORMAL;
+  }
+  if (static_cast<unsigned>(priority) >= N_PRIORITIES ||
+      static_cast<unsigned>(source) >= ThreadManager::N_SOURCES) {
+    throw std::invalid_argument("Invalid ThreadManager priority or source");
+  }
+  return static_cast<size_t>(priority) * ThreadManager::N_SOURCES +
+      static_cast<size_t>(source);
+}
+
+std::shared_ptr<folly::Executor> wrapExecutor(
+    folly::Executor::KeepAlive<> executor) {
+  if (!executor) {
+    throw std::invalid_argument("ThreadManager executor must not be null");
+  }
+  return std::make_shared<folly::VirtualExecutor>(std::move(executor));
+}
+
 /* Translates from wangle priorities (normal at 0, higher is higher)
    to thrift priorities */
 PRIORITY translatePriority(int8_t priority) {
@@ -500,9 +522,9 @@ class SimpleThreadManagerImpl : public ThreadManager::Impl {
     addWorker(workerCount_);
   }
 
-  KeepAlive<> getKeepAlive(ExecutionScope, Source source) const override {
-    DCHECK(static_cast<uint8_t>(source) < executors_.size());
-    return getKeepAliveToken(*executors_[static_cast<uint8_t>(source)]);
+  KeepAlive<> getKeepAlive(ExecutionScope es, Source source) const override {
+    const auto idx = checkedExecutorIndex(es.getPriority(), source) % N_SOURCES;
+    return getKeepAliveToken(*executors_[idx]);
   }
 
   void addWithPriorityAndSource(folly::Func f, PRIORITY pri, Source source) {
@@ -1284,8 +1306,7 @@ class PriorityThreadManager::PriorityImpl
   }
 
   KeepAlive<> getKeepAlive(ExecutionScope es, Source source) const override {
-    size_t idx = es.getPriority() * N_SOURCES + static_cast<uint8_t>(source);
-    DCHECK(idx < executors_.size());
+    const auto idx = checkedExecutorIndex(es.getPriority(), source);
     return getKeepAliveToken(*executors_[idx]);
   }
 
@@ -1531,8 +1552,7 @@ class PriorityQueueThreadManager : public ThreadManager::Impl {
   }
 
   KeepAlive<> getKeepAlive(ExecutionScope es, Source source) const override {
-    size_t idx = es.getPriority() * N_SOURCES + static_cast<uint8_t>(source);
-    DCHECK(idx < executors_.size());
+    const auto idx = checkedExecutorIndex(es.getPriority(), source);
     return getKeepAliveToken(*executors_[idx]);
   }
 
@@ -1571,12 +1591,11 @@ std::array<T, N> fillArrayWith(const T& t) {
 
 constexpr auto N_SOURCES = ThreadManager::N_SOURCES;
 int idxFromPriSrc(int pri, int source) {
-  DCHECK(pri < N_PRIORITIES);
+  if (static_cast<unsigned>(pri) >= N_PRIORITIES ||
+      static_cast<unsigned>(source) >= N_SOURCES) {
+    throw std::invalid_argument("Invalid ThreadManager priority or source");
+  }
   return pri * N_SOURCES + source;
-}
-
-int idxFromPriSrc(PRIORITY pri, ThreadManager::Source source) {
-  return idxFromPriSrc(static_cast<int>(pri), static_cast<int>(source));
 }
 
 template <typename F>
@@ -1600,7 +1619,7 @@ ThreadManagerExecutorAdapter::ThreadManagerExecutorAdapter(
 ThreadManagerExecutorAdapter::ThreadManagerExecutorAdapter(
     folly::Executor::KeepAlive<> ka, Options opts)
     : ThreadManagerExecutorAdapter(
-          std::make_shared<folly::VirtualExecutor>(std::move(ka)),
+          wrapExecutor(std::move(ka)),
           std::move(opts)) {}
 
 ThreadManagerExecutorAdapter::ThreadManagerExecutorAdapter(
@@ -1718,7 +1737,8 @@ void ThreadManagerExecutorAdapter::add(folly::Func f) {
 
 folly::Executor::KeepAlive<> ThreadManagerExecutorAdapter::getKeepAlive(
     ExecutionScope es, Source source) const {
-  return getKeepAliveToken(executors_[idxFromPriSrc(es.getPriority(), source)]);
+  return getKeepAliveToken(
+      executors_[checkedExecutorIndex(es.getPriority(), source)]);
 }
 
 namespace {

@@ -692,6 +692,10 @@ struct Decode<type::list<Tag>> {
            std::is_same_v<ElemT, std::int64_t>) &&
           apache::thrift::detail::pm::
               can_batch_int_list_read_v<Protocol, ListType, ElemT>) {
+        // Reject an impossible element count before resizing the destination.
+        if (!apache::thrift::canReadNElements(prot, s, {t})) {
+          protocol::TProtocolException::throwTruncatedData();
+        }
         const std::size_t old_size = list.size();
         list.resize(old_size + s);
         if constexpr (std::is_same_v<ElemT, std::int16_t>) {

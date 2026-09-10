@@ -73,6 +73,15 @@ class HeaderServerChannel : public ServerChannel,
   // Server interface from ResponseChannel
   void setCallback(ResponseChannel::Callback* callback) override;
 
+  // Configure before receiving data (on the channel's EventBase thread).
+  void setHeaderReadLimits(const transport::THeader::ReadLimits& limits) {
+    limits.validate();
+    headerReadLimits_ = limits;
+  }
+  const transport::THeader::ReadLimits& getHeaderReadLimits() const {
+    return headerReadLimits_;
+  }
+
   virtual void sendMessage(
       Cpp2Channel::SendCallback* callback,
       std::unique_ptr<folly::IOBuf> buf,
@@ -237,6 +246,7 @@ class HeaderServerChannel : public ServerChannel,
   uint32_t sampleRate_;
 
   transport::THeader::StringToStringMap persistentReadHeaders_;
+  transport::THeader::ReadLimits headerReadLimits_;
 
   std::shared_ptr<Cpp2Channel> cpp2Channel_;
 };

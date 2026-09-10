@@ -38,7 +38,7 @@ AccLibBenchmark/
 ```
 
 由于AccLibBenchmark作为压测工具的代码汇总，我们拉取后，只应用其中的`fbthrift_folly_benchmark`压测工具，以及`fb_folly_autobuild`的自动化脚本，如上图所示。
-> **说明:** 使用脚本安装时,默认拉取优化代码版本，若基于开源仓需要代码补丁，请将补丁仓master分支下的`fbthrift_folly.patch`放在`fb_folly_autobuild/`目录下，脚本支持自动补全补丁。
+> **说明:** 使用脚本安装时,默认拉取优化代码版本，若基于开源仓需要代码补丁，请将补丁仓master分支下的`fbthrift_folly.patch`放在`fb_folly_autobuild/`目录下，脚本支持自动应用补丁。
 
 ## 2. 编译环境
 
@@ -301,7 +301,7 @@ export LD_LIBRARY_PATH="$INS/fbthrift/lib:$INS/fbthrift/lib64:$INS/wangle/lib:$I
    test -f run.py
    ```
 
-如[第一章](#1-创建工作目录并获取公共Benchmark仓库)所言，`fbthrift_folly.patch`仅在需要由FbThrift v1.1.0发布包提供并放到当前目录。
+如[第一章](#1-创建工作目录并获取公共Benchmark仓库)所言，`fbthrift_folly.patch`仅在需要由FbThrift v1.1.0发布包提供并，请将其放到当前目录。
 
 ### 4.2 适配公共仓库目录
 
@@ -330,7 +330,7 @@ export LD_LIBRARY_PATH="$INS/fbthrift/lib:$INS/fbthrift/lib64:$INS/wangle/lib:$I
 至少确认以下配置。
 
 ```python
-WORK = Path("/data/your-user/fbthrift-work")
+WORK = Path("/home/your-user/fbthrift-work")
 INS = WORK / "ins"
 
 AUTO_REENTRY = True

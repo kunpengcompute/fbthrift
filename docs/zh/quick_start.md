@@ -29,6 +29,7 @@ cd "$WORK/fbthrift"
 ```
 
 1.2~1.4均为补丁仓的获取与应用，若已获取优化源码，即可跳转至[第二章](#2-编译环境)进行编译准备。
+
 ### 1.2 获取基线源码、补丁和校验文件
 
 基线源码保存在`$WORK/fbthrift`目录，补丁和校验文件保存在`$WORK/fbthrift-patches`目录。
@@ -202,7 +203,7 @@ AccLibBenchmark/
     └── run.py
 ```
 
-由于AccLibBenchmark作为压测工具的代码汇总。拉取后，只应用其中的`fbthrift_folly_benchmark`压测工具，以及`fb_folly_autobuild`的自动化脚本，如上方目录结构所示。
+由于AccLibBenchmark作为压测工具的代码汇总，众多工具我们不会使用。因此拉取压测工具代码仓后后，只选用其中的`fbthrift_folly_benchmark`压测工具，以及`fb_folly_autobuild`的自动化脚本，如上方目录结构所示。
 
 > **说明:** 使用脚本安装时，默认拉取优化代码版本。若需要由脚本应用补丁，请先按第1.3节完成补丁校验，再将`fbthrift_folly.patch`放在`fb_folly_autobuild/`目录下。脚本安装方式见第4章。
 

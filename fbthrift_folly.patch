@@ -1,3 +1,10 @@
+diff --git a/.projectid b/.projectid
+new file mode 100644
+index 0000000000000000000000000000000000000000..35d37cd313fe377d87dc35a5ce28ba62cb93621c
+--- /dev/null
++++ b/.projectid
+@@ -0,0 +1 @@
++fbthrift
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 766130e072db2f7ea2d7c57448f937e4b254f6de..3edc4584cb74581c5754cf9917bac642727d6265 100644
 --- a/CMakeLists.txt
@@ -36,16 +43,773 @@ index 766130e072db2f7ea2d7c57448f937e4b254f6de..3edc4584cb74581c5754cf9917bac642
  # Enable modular builds
  option(compiler_only "Build the Thrift Compiler only" OFF)
  option(lib_only "Build the Thrift Libraries only" OFF)
+diff --git a/build.sh b/build.sh
+new file mode 100644
+index 0000000000000000000000000000000000000000..a2a47c9080088271da02211c2941b7e9b27e4f60
+--- /dev/null
++++ b/build.sh
+@@ -0,0 +1,316 @@
++#!/usr/bin/env bash
++# One-click fbthrift build via getdeps.
++#
++# Dependency cache (ALL third-party tarballs, including double-conversion /
++# gflags / glog / folly / etc.) lives under one tree:
++#   ${GETDEPS_SCRATCH:-<repo>/third_party/getdeps}/
++#     downloads/   # source archives; getdeps reuses if present and sha256 matches
++#     extracted/   # unpacked sources
++#     build/       # object files
++#     installed/   # per-dep install prefixes
++#
++# Multiple clones can share one cache: GETDEPS_SCRATCH=/data/fbdeps ./build.sh
++#
++# Prefetch below only runs curl when the target file is missing (same filenames
++# getdeps uses: manifest_name + "-" + basename(url path)).
++#
++# Options:
++#   --allow-system-packages: prefer OS packages when getdeps can satisfy a dep.
++#   --no-tests: skip building fbthrift tests.
++#
++# Env overrides:
++#   GETDEPS_SCRATCH=/path   cache root (default: <repo>/third_party/getdeps)
++#   JOBS=8                  parallel jobs (default: min(nproc, 16); folly needs RAM)
++#   GETDEPS_CLEAN=1         pass --clean to getdeps (wipe scratch, full rebuild)
++#   USE_CLANG16=1           use Clang 16 (default: on if CLANG16_ROOT exists)
++#   USE_CLANG16=0           force system GCC
++#   CLANG16_ROOT=/path      default: /home/gxt/clang-16
++
++set -euo pipefail
++
++ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++cd "$ROOT_DIR"
++
++PATCHES_DIR="$ROOT_DIR/patches"
++FBCODE_BUILDER="$ROOT_DIR/build/fbcode_builder"
++GETDEPS_PY="$FBCODE_BUILDER/getdeps.py"
++SCRATCH="${GETDEPS_SCRATCH:-$ROOT_DIR/third_party/getdeps}"
++DOWNLOADS="$SCRATCH/downloads"
++REPOS="$SCRATCH/repos"
++
++# Restore getdeps toolchain if missing, then apply patches/ overlays (openEuler, xxhash, …).
++ensure_fbcode_builder() {
++  if [[ ! -f "$GETDEPS_PY" ]]; then
++    if [[ -d "$ROOT_DIR/.git" ]]; then
++      echo "[getdeps] missing $GETDEPS_PY; restoring build/fbcode_builder from git..."
++      git -C "$ROOT_DIR" checkout HEAD -- build/fbcode_builder
++    fi
++  fi
++  if [[ ! -f "$GETDEPS_PY" ]]; then
++    echo "ERROR: $GETDEPS_PY not found."
++    echo "  Use a full fbthrift clone that includes build/fbcode_builder/ (getdeps.py)."
++    exit 1
++  fi
++  apply_build_patches
++}
++
++apply_build_patches() {
++  local p overlay
++  for p in "$PATCHES_DIR"/fbcode_builder/*.patch; do
++    [[ -f "$p" ]] || continue
++    if patch -p1 -d "$ROOT_DIR" --forward --dry-run --silent -i "$p" 2>/dev/null; then
++      patch -p1 -d "$ROOT_DIR" --forward --silent -i "$p"
++      echo "[patch] $(basename "$p")"
++    else
++      echo "[patch] skip (already applied): $(basename "$p")"
++    fi
++  done
++  overlay="$PATCHES_DIR/fbcode_builder/overlay"
++  if [[ -d "$overlay" ]]; then
++    echo "[patch] overlay -> build/fbcode_builder"
++    cp -a "$overlay"/. "$FBCODE_BUILDER/"
++  fi
++  overlay="$PATCHES_DIR/deps/overlay"
++  if [[ -d "$overlay" ]]; then
++    echo "[patch] overlay -> build/deps"
++    mkdir -p "$ROOT_DIR/build/deps"
++    cp -a "$overlay"/. "$ROOT_DIR/build/deps/"
++  fi
++  # Cloned fbthrift source may lack FindXxhash.cmake on older pins.
++  local fbthrift_repo="$REPOS/github.com-facebook-fbthrift.git"
++  if [[ -f "$PATCHES_DIR/fbcode_builder/overlay/CMake/FindXxhash.cmake" ]]; then
++    if [[ -d "$fbthrift_repo/build/fbcode_builder/CMake" ]]; then
++      cp -f "$PATCHES_DIR/fbcode_builder/overlay/CMake/FindXxhash.cmake" \
++        "$fbthrift_repo/build/fbcode_builder/CMake/"
++    fi
++  fi
++}
++
++ensure_fbcode_builder
++
++# Git 2.35+ rejects repos owned by another user ("dubious ownership"), e.g. cache
++# populated by root. Trust getdeps checkouts for this process only (not ~/.gitconfig).
++run_getdeps() {
++  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*' \
++    python3 "$GETDEPS_PY" "$@"
++}
++
++prepare_getdeps_git_repos() {
++  [[ -d "$REPOS" ]] || return 0
++  local uid repo ouid
++  uid="$(id -u)"
++  for repo in "$REPOS"/*; do
++    [[ -d "$repo/.git" ]] || continue
++    ouid="$(stat -c '%u' "$repo" 2>/dev/null)" || continue
++    if [[ "$ouid" == "$uid" ]]; then
++      continue
++    fi
++    if [[ "$EUID" -eq 0 && -n "${SUDO_UID:-}" ]]; then
++      echo "[git] chown $repo -> uid $SUDO_UID"
++      chown -R "$SUDO_UID:$SUDO_GID" "$repo"
++    else
++      echo "[git] warning: $repo owned by uid $ouid (you are $uid)"
++      echo "[git] fix: sudo chown -R $(id -un):$(id -gn) $REPOS"
++    fi
++  done
++}
++
++if J="$(nproc 2>/dev/null)"; then
++  :
++elif J="$(sysctl -n hw.ncpu 2>/dev/null)"; then
++  :
++else
++  J=4
++fi
++JOBS="${JOBS:-$J}"
++if [[ "$JOBS" -gt 16 ]]; then
++  JOBS=16
++fi
++
++# Folly assumes x86_64 when CMAKE_LIBRARY_ARCHITECTURE is empty (enables -msse4.2).
++MACHINE_ARCH="$(uname -m)"
++CLANG16_ROOT="${CLANG16_ROOT:-/home/gxt/clang-16}"
++USE_CLANG16="${USE_CLANG16:-}"
++if [[ -z "$USE_CLANG16" && -x "$CLANG16_ROOT/bin/clang" ]]; then
++  USE_CLANG16=1
++fi
++
++# openEuler aarch64: -lunwind often resolves to libunwind.so.1 while folly's
++# StackTrace needs unw_backtrace from libunwind.so.8 ("DSO missing from command line").
++detect_unwind_ldflags() {
++  local arch="$1"
++  local libdir="/usr/lib64"
++  [[ -d /usr/lib/aarch64-linux-gnu ]] && libdir="/usr/lib/aarch64-linux-gnu"
++  local libs=()
++  if [[ -f "$libdir/libunwind.so.8" ]]; then
++    libs+=("$libdir/libunwind.so.8")
++  fi
++  if [[ "$arch" == aarch64* && -f "$libdir/libunwind-aarch64.so.8" ]]; then
++    libs+=("$libdir/libunwind-aarch64.so.8")
++  fi
++  if [[ ${#libs[@]} -gt 0 ]]; then
++    printf '%s ' '-Wl,--no-as-needed' "${libs[@]}" '-latomic'
++  else
++    printf '%s' '-Wl,--no-as-needed -lunwind -latomic'
++  fi
++  # Non-PIC static boost .a + default PIE link fails on aarch64; allow non-PIC .a.
++  if [[ "$arch" == aarch64* ]]; then
++    printf '%s' ' -no-pie'
++  fi
++}
++
++if [[ "$USE_CLANG16" == "1" && -x "$CLANG16_ROOT/bin/clang" ]]; then
++  export CC="$CLANG16_ROOT/bin/clang"
++  export CXX="$CLANG16_ROOT/bin/clang++"
++  echo "[compiler] Clang 16: $CXX"
++  UNWIND_LDFLAGS="$(detect_unwind_ldflags "$MACHINE_ARCH")"
++  echo "[link] unwind: $UNWIND_LDFLAGS"
++  # Only pass unwind via CMake flags. Do NOT export LDFLAGS globally: it breaks
++  # ninja/bootstrap when the host lacks the libunwind soname ninja was linked against.
++  EXTRA_CMAKE_DEFINES=$(
++    printf '{"CMAKE_LIBRARY_ARCHITECTURE":"%s","CMAKE_POSITION_INDEPENDENT_CODE":"ON","CMAKE_EXE_LINKER_FLAGS":"%s","CMAKE_SHARED_LINKER_FLAGS":"%s","CMAKE_MODULE_LINKER_FLAGS":"%s","THRIFT_RPC":"OFF","THRIFT_BENCHMARKS":"OFF"}' \
++      "$MACHINE_ARCH" "$UNWIND_LDFLAGS" "$UNWIND_LDFLAGS" "$UNWIND_LDFLAGS"
++  )
++else
++  unset CC CXX
++  echo "[compiler] system $(command -v g++ || command -v c++)"
++  EXTRA_CMAKE_DEFINES=$(
++    printf '{"CMAKE_CXX_FLAGS":"-Wno-class-memaccess","CMAKE_LIBRARY_ARCHITECTURE":"%s","CMAKE_POSITION_INDEPENDENT_CODE":"ON","THRIFT_RPC":"OFF","THRIFT_BENCHMARKS":"OFF"}' \
++      "$MACHINE_ARCH"
++  )
++fi
++
++# Boost: b2 must use -fPIC; wipe cached objects if manifest flags change.
++BOOST_FPIC_STAMP="$SCRATCH/installed/.boost_fpic_v2"
++if [[ ! -f "$BOOST_FPIC_STAMP" ]]; then
++  echo "[boost] clean rebuild with cflags/cxxflags/linkflags=-fPIC"
++  rm -rf "$SCRATCH"/extracted/boost-* "$SCRATCH"/build/boost-* "$SCRATCH"/installed/boost-*
++  rm -f "$SCRATCH/installed/.boost_built_with_fpic"
++  rm -rf "$SCRATCH/build/fbthrift"
++  mkdir -p "$SCRATCH/installed"
++  touch "$BOOST_FPIC_STAMP"
++fi
++echo "[cmake] THRIFT_RPC=OFF (skip mvfst/fizz/wangle at configure time)"
++
++# Reconfigure folly if compiler or unwind link flags changed.
++FOLLY_CACHE="$SCRATCH/build/folly/CMakeCache.txt"
++if [[ -f "$FOLLY_CACHE" ]]; then
++  WIPE_FOLLY=
++  if [[ -n "${CXX:-}" ]]; then
++    OLD_CXX="$(sed -n 's|^CMAKE_CXX_COMPILER:FILEPATH=||p' "$FOLLY_CACHE" | head -1)"
++    if [[ -n "$OLD_CXX" && "$OLD_CXX" != "$CXX" ]]; then
++      echo "[compiler] folly was built with $OLD_CXX, wiping for $CXX"
++      WIPE_FOLLY=1
++    fi
++  fi
++  if [[ -n "${UNWIND_LDFLAGS:-}" ]]; then
++    OLD_LDFLAGS="$(sed -n 's|^CMAKE_EXE_LINKER_FLAGS:STRING=||p' "$FOLLY_CACHE" | head -1)"
++    if [[ -n "$OLD_LDFLAGS" && "$OLD_LDFLAGS" != "$UNWIND_LDFLAGS" ]]; then
++      echo "[link] folly linker flags changed, wiping folly build"
++      WIPE_FOLLY=1
++    fi
++  fi
++  if [[ -n "$WIPE_FOLLY" ]]; then
++    rm -rf "$SCRATCH/build/folly" "$SCRATCH/installed/folly"
++  fi
++fi
++
++mkdir -p "$DOWNLOADS"
++
++# Heal ninja if a prior run linked it against missing libunwind.so.1 (bad LDFLAGS).
++for _nb in "$SCRATCH"/build/ninja-*/ninja "$SCRATCH"/extracted/ninja-*/ninja-*/ninja; do
++  if [[ -x "$_nb" ]] && ! "$_nb" --version &>/dev/null; then
++    echo "[ninja] removing broken ninja: $_nb"
++    rm -rf "$SCRATCH"/build/ninja-* "$SCRATCH"/installed/ninja-* "$SCRATCH"/extracted/ninja-*
++    break
++  fi
++done
++unset _nb
++
++# fizz needs cmake >= 3.20.4. getdeps used to build 3.20.2 on openEuler because
++# platform.py did not treat openeuler as rpm (fixed there). Prefer /usr/bin/cmake.
++CMAKE_INSTALL_ARGS=()
++if SYS_CMAKE_VER="$(cmake --version 2>/dev/null | sed -n 's/cmake version //p' | head -1)"; then
++  if printf '3.20.4\n%s\n' "$SYS_CMAKE_VER" | sort -V -C 2>/dev/null; then
++    echo "[cmake] use system cmake $SYS_CMAKE_VER"
++    rm -rf "$SCRATCH"/installed/cmake-* "$SCRATCH"/build/cmake-* 2>/dev/null || true
++    CMAKE_INSTALL_ARGS=(--install-dir "cmake:/usr")
++  fi
++fi
++
++prefetch_if_missing() {
++  local url="$1" dest="$2"
++  if [[ -f "$dest" ]] && [[ -s "$dest" ]]; then
++    echo "[cache] skip: $(basename "$dest")"
++    return 0
++  fi
++  echo "[fetch] $(basename "$dest")"
++  curl -fL --retry 5 --retry-delay 3 --connect-timeout 30 "$url" -o "$dest.tmp" && mv -f "$dest.tmp" "$dest"
++}
++
++echo "[1/3] Warm download cache (only if missing): $DOWNLOADS"
++# Names must match getdeps ArchiveFetcher: downloads/<manifest>-<basename(url)>
++prefetch_if_missing "https://www.zlib.net/fossils/zlib-1.2.13.tar.gz" \
++  "$DOWNLOADS/zlib-zlib-1.2.13.tar.gz" || true
++prefetch_if_missing "https://github.com/facebook/zstd/releases/download/v1.4.5/zstd-1.4.5.tar.gz" \
++  "$DOWNLOADS/zstd-zstd-1.4.5.tar.gz" || true
++prefetch_if_missing "https://github.com/fmtlib/fmt/archive/refs/tags/8.0.1.tar.gz" \
++  "$DOWNLOADS/fmt-8.0.1.tar.gz" || true
++prefetch_if_missing "https://archives.boost.io/release/1.78.0/source/boost_1_78_0.tar.gz" \
++  "$DOWNLOADS/boost-boost_1_78_0.tar.gz" || true
++prefetch_if_missing "https://github.com/google/double-conversion/archive/v3.1.4.tar.gz" \
++  "$DOWNLOADS/double-conversion-v3.1.4.tar.gz" || true
++prefetch_if_missing "https://github.com/gflags/gflags/archive/v2.2.2.tar.gz" \
++  "$DOWNLOADS/gflags-v2.2.2.tar.gz" || true
++prefetch_if_missing "https://github.com/google/glog/archive/v0.5.0.tar.gz" \
++  "$DOWNLOADS/glog-v0.5.0.tar.gz" || true
++prefetch_if_missing "https://github.com/jedisct1/libsodium/releases/download/1.0.18-RELEASE/libsodium-1.0.18.tar.gz" \
++  "$DOWNLOADS/libsodium-libsodium-1.0.18.tar.gz" || true
++prefetch_if_missing "https://github.com/Cyan4973/xxHash/archive/refs/tags/v0.8.3.tar.gz" \
++  "$DOWNLOADS/xxhash-v0.8.3.tar.gz" || true
++
++# CI image build: FBTHRIFT_PREFETCH_ONLY=1 ./build.sh  (or ci/prefetch-deps.sh)
++if [[ "${FBTHRIFT_PREFETCH_ONLY:-0}" == "1" ]]; then
++  echo "[prefetch] getdeps fetch --recursive fbthrift -> $SCRATCH"
++  run_getdeps fetch --recursive fbthrift \
++    --scratch-path "$SCRATCH" \
++    --allow-system-packages
++  echo "[prefetch] done. downloads: $DOWNLOADS"
++  exit 0
++fi
++
++CLEAN_ARGS=()
++if [[ "${GETDEPS_CLEAN:-0}" == "1" ]]; then
++  CLEAN_ARGS=(--clean)
++fi
++
++prepare_getdeps_git_repos
++
++# Free space: old github clone + cargo copy of full tree (including .git).
++if [[ -d "$REPOS/github.com-facebook-fbthrift.git" ]]; then
++  echo "[cleanup] removing unused github fbthrift clone: $REPOS/github.com-facebook-fbthrift.git"
++  rm -rf "$REPOS/github.com-facebook-fbthrift.git"
++fi
++if [[ -d "$SCRATCH/build/fbthrift/source" ]]; then
++  echo "[cleanup] removing cargo source mirror (was duplicate of repo + .git)"
++  rm -rf "$SCRATCH/build/fbthrift/source"
++fi
++
++# Build fbthrift from THIS repo (--src-dir). Manifest [cargo] is disabled so getdeps
++# does not copytree $ROOT_DIR -> build/fbthrift/source (that duplicated .git and OOMed disk).
++echo "[src] fbthrift sources: $ROOT_DIR"
++echo "[2/3] Build fbthrift (incremental unless GETDEPS_CLEAN=1)..."
++run_getdeps build fbthrift \
++  "${CLEAN_ARGS[@]}" \
++  --scratch-path "$SCRATCH" \
++  --src-dir "$ROOT_DIR" \
++  --num-jobs "$JOBS" \
++  --no-tests \
++  --allow-system-packages \
++  "${CMAKE_INSTALL_ARGS[@]}" \
++  --extra-cmake-defines "$EXTRA_CMAKE_DEFINES"
++
++echo "[3/3] Done."
++echo "Scratch (deps + build cache): $SCRATCH"
++echo "Tarball cache: $DOWNLOADS"
++echo "Installed prefixes: $SCRATCH/installed/"
+diff --git a/build/deps/github_hashes/facebookincubator/fizz-rev.txt b/build/deps/github_hashes/facebookincubator/fizz-rev.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..66b3dfab0488f4057bfb3623ccdadf3fe8ef64a6
+--- /dev/null
++++ b/build/deps/github_hashes/facebookincubator/fizz-rev.txt
+@@ -0,0 +1 @@
++Subproject commit f4d134caeef279737994e597630228d5a31eabcb
+diff --git a/build/fbcode_builder/CMake/FindXxhash.cmake b/build/fbcode_builder/CMake/FindXxhash.cmake
+new file mode 100644
+index 0000000000000000000000000000000000000000..fb937a9c917634d9175f6b10aa205c8a45c6e01c
+--- /dev/null
++++ b/build/fbcode_builder/CMake/FindXxhash.cmake
+@@ -0,0 +1,40 @@
++# Copyright (c) Facebook, Inc. and its affiliates.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++#
++# - Try to find Facebook xxhash library
++# This will define
++# Xxhash_FOUND
++# Xxhash_INCLUDE_DIR
++# Xxhash_LIBRARY
++#
++
++find_path(Xxhash_INCLUDE_DIR NAMES xxhash.h)
++
++find_library(Xxhash_LIBRARY_RELEASE NAMES xxhash)
++
++include(SelectLibraryConfigurations)
++SELECT_LIBRARY_CONFIGURATIONS(Xxhash)
++
++include(FindPackageHandleStandardArgs)
++FIND_PACKAGE_HANDLE_STANDARD_ARGS(
++  Xxhash DEFAULT_MSG
++  Xxhash_LIBRARY Xxhash_INCLUDE_DIR
++)
++
++if (Xxhash_FOUND)
++  message(STATUS "Found xxhash: ${Xxhash_LIBRARY}")
++endif()
++
++mark_as_advanced(Xxhash_INCLUDE_DIR Xxhash_LIBRARY)
+diff --git a/build/fbcode_builder/getdeps/platform.py b/build/fbcode_builder/getdeps/platform.py
+index edce96c3ba66fa0ccf2d7c41bd6ffe4e1af6edd6..1ad0f4e0c8dda01148b33cf49b2ace864e5b8bf6 100644
+--- a/build/fbcode_builder/getdeps/platform.py
++++ b/build/fbcode_builder/getdeps/platform.py
+@@ -243,7 +243,16 @@ class HostType(object):
+             return None
+         if self.is_darwin():
+             return "homebrew"
+-        if self.distro in ("fedora", "centos", "centos_stream"):
++        if self.distro in (
++            "fedora",
++            "centos",
++            "centos_stream",
++            "rhel",
++            "openeuler",
++            "eurolinux",
++            "rocky",
++            "almalinux",
++        ):
+             return "rpm"
+         if self.distro.startswith(("debian", "ubuntu")):
+             return "deb"
+diff --git a/build/fbcode_builder/manifests/boost b/build/fbcode_builder/manifests/boost
+index 82ae6e54214b7a4319bda5dbedb9fba7ec010cb5..5c31c03886f3559e81d59da7e3b1e600969ba5d9 100644
+--- a/build/fbcode_builder/manifests/boost
++++ b/build/fbcode_builder/manifests/boost
+@@ -82,7 +82,6 @@ job_weight_mib = 512
+ --with-math
+ --with-mpi
+ --with-program_options
+---with-python
+ --with-random
+ --with-regex
+ --with-serialization
+@@ -103,6 +102,10 @@ job_weight_mib = 512
+ # RHEL hardened gcc is not compatible with PCH
+ # https://bugzilla.redhat.com/show_bug.cgi?id=1806545
+ pch=off
++# Static .a must be PIC when linking PIE executables on aarch64 (see build.sh -no-pie fallback).
++cflags=-fPIC
++cxxflags=-fPIC
++linkflags=-fPIC
+ 
+ [b2.args.os=darwin]
+ toolset=clang
+diff --git a/build/fbcode_builder/manifests/cmake b/build/fbcode_builder/manifests/cmake
+index 71548f119cba55e14e17f3d6d9fff6da416e0768..4141ee528a545cac53990d03864248bd6fb03080 100644
+--- a/build/fbcode_builder/manifests/cmake
++++ b/build/fbcode_builder/manifests/cmake
+@@ -23,8 +23,8 @@ url = https://github.com/Kitware/CMake/releases/download/v3.20.2/cmake-3.20.2-ma
+ sha256 = 0100663380a3bd977b001183cd487412db7aad9de6859927bde97e1e6e44e645
+ 
+ [download.any(os=linux,os=freebsd)]
+-url = https://github.com/Kitware/CMake/releases/download/v3.20.2/cmake-3.20.2.tar.gz
+-sha256 = aecf6ecb975179eb3bb6a4a50cae192d41e92b9372b02300f9e8f1d5f559544e
++url = https://github.com/Kitware/CMake/releases/download/v3.22.0/cmake-3.22.0.tar.gz
++sha256 = 932c038361dc8d9701ee93cb029a877bc0ec3cc1999da4006d006bcbdd748c9
+ 
+ [build.os=windows]
+ builder = nop
+@@ -40,7 +40,7 @@ CMake.app/Contents/share = share
+ 
+ [build.any(os=linux,os=freebsd)]
+ builder = cmakebootstrap
+-subdir = cmake-3.20.2
++subdir = cmake-3.22.0
+ 
+ [make.install_args.any(os=linux,os=freebsd)]
+ install
+diff --git a/build/fbcode_builder/manifests/fbthrift b/build/fbcode_builder/manifests/fbthrift
+index b4ca88315ccbcc3a9c27d9da9c0d13838849cd01..f0c30de1bc3ae97e6ef9486e67bebdcfe91aef80 100644
+--- a/build/fbcode_builder/manifests/fbthrift
++++ b/build/fbcode_builder/manifests/fbthrift
+@@ -4,14 +4,9 @@ fbsource_path = fbcode/thrift
+ shipit_project = fbthrift
+ shipit_fbcode_builder = true
+ 
+-[git]
+-repo_url = https://github.com/facebook/fbthrift.git
+-
+-[cargo]
+-cargo_config_file =  source/thrift/lib/rust/.cargo/config
+-
+-[crate.pathmap]
+-fbthrift = thrift/lib/rust
++# [git] omitted: build.sh passes --src-dir to use this checkout (no github clone).
++# [cargo] omitted: C++-only build; cargo prepare copies the whole tree (+ .git) into
++# build/fbthrift/source and can fill the disk.
+ 
+ [build]
+ builder = cmake
+@@ -25,6 +20,7 @@ googletest
+ libsodium
+ python-six
+ wangle
++xxhash
+ zstd
+ # Thrift also depends on openssl but since the latter requires a platform-
+ # specific configuration we rely on the folly manifest to provide this
+diff --git a/build/fbcode_builder/manifests/libsodium b/build/fbcode_builder/manifests/libsodium
+index c37f4b5a619edc5807237b08e6537fdb9a9528a1..23ef95f48cfccd11d6f34aa89d3f25a85e5c0bcd 100644
+--- a/build/fbcode_builder/manifests/libsodium
++++ b/build/fbcode_builder/manifests/libsodium
+@@ -12,16 +12,18 @@ libsodium-devel
+ libsodium-static
+ 
+ [download.not(os=windows)]
+-url = https://github.com/jedisct1/libsodium/releases/download/1.0.17/libsodium-1.0.17.tar.gz
+-sha256 = 0cc3dae33e642cc187b5ceb467e0ad0e1b51dcba577de1190e9ffa17766ac2b1
++# 1.0.17 GitHub release assets were removed; use 1.0.18 (same autoconf layout).
++url = https://github.com/jedisct1/libsodium/releases/download/1.0.18-RELEASE/libsodium-1.0.18.tar.gz
++sha256 = 6f504490b342a4f8a4c4a02fc9b866cbef8622d5df4e5452b46be121e46636c1
+ 
+ [build.not(os=windows)]
+ builder = autoconf
+-subdir = libsodium-1.0.17
++subdir = libsodium-1.0.18
+ 
+ [download.os=windows]
+-url = https://download.libsodium.org/libsodium/releases/libsodium-1.0.17-msvc.zip
+-sha256 = f0f32ad8ebd76eee99bb039f843f583f2babca5288a8c26a7261db9694c11467
++# Official download.libsodium.org no longer hosts 1.0.17 MSVC zip; use GitHub release.
++url = https://github.com/jedisct1/libsodium/releases/download/1.0.18-RELEASE/libsodium-1.0.18-msvc.zip
++sha256 = c1d48d85c9361e350931ffe5067559cd7405a697c655d26955fb568d1084a5f4
+ 
+ [build.os=windows]
+ builder = nop
+diff --git a/build/fbcode_builder/manifests/xxhash b/build/fbcode_builder/manifests/xxhash
+new file mode 100644
+index 0000000000000000000000000000000000000000..80064f2827ca0fb99bb2c37680db5f1ee296bddc
+--- /dev/null
++++ b/build/fbcode_builder/manifests/xxhash
+@@ -0,0 +1,23 @@
++[manifest]
++name = xxhash
++
++[download]
++url = https://github.com/Cyan4973/xxHash/archive/refs/tags/v0.8.3.tar.gz
++sha256 = aae608dfe8213dfd05d909a57718ef82f30722c392344583d3f39050c7f29a80
++
++[rpms]
++xxhash-devel
++
++[debs]
++libxxhash-dev
++xxhash
++
++[homebrew]
++xxhash
++
++[build]
++builder = cmake
++subdir = xxHash-0.8.3/cmake_unofficial
++
++[cmake.defines]
++CMAKE_POSITION_INDEPENDENT_CODE = ON
+diff --git a/patches/deps/overlay/github_hashes/facebookincubator/fizz-rev.txt b/patches/deps/overlay/github_hashes/facebookincubator/fizz-rev.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..66b3dfab0488f4057bfb3623ccdadf3fe8ef64a6
+--- /dev/null
++++ b/patches/deps/overlay/github_hashes/facebookincubator/fizz-rev.txt
+@@ -0,0 +1 @@
++Subproject commit f4d134caeef279737994e597630228d5a31eabcb
+diff --git a/patches/fbcode_builder/0001-openeuler-rpm-platform.patch b/patches/fbcode_builder/0001-openeuler-rpm-platform.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..65168a65c4aaded191527d86a6648102c879e515
+--- /dev/null
++++ b/patches/fbcode_builder/0001-openeuler-rpm-platform.patch
+@@ -0,0 +1,20 @@
++--- a/build/fbcode_builder/getdeps/platform.py
+++++ b/build/fbcode_builder/getdeps/platform.py
++@@ -243,7 +243,16 @@ class HostType(object):
++             return None
++         if self.is_darwin():
++             return "homebrew"
++-        if self.distro in ("fedora", "centos", "centos_stream"):
+++        if self.distro in (
+++            "fedora",
+++            "centos",
+++            "centos_stream",
+++            "rhel",
+++            "openeuler",
+++            "eurolinux",
+++            "rocky",
+++            "almalinux",
+++        ):
++             return "rpm"
++         if self.distro.startswith(("debian", "ubuntu")):
++             return "deb"
+diff --git a/patches/fbcode_builder/0002-cmake-3.22.0.patch b/patches/fbcode_builder/0002-cmake-3.22.0.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..84d93cbe30571273df101425c225a01122bd40f9
+--- /dev/null
++++ b/patches/fbcode_builder/0002-cmake-3.22.0.patch
+@@ -0,0 +1,22 @@
++--- a/build/fbcode_builder/manifests/cmake
+++++ b/build/fbcode_builder/manifests/cmake
++@@ -23,8 +23,8 @@ url = https://github.com/Kitware/CMake/releases/download/v3.20.2/cmake-3.20.2-ma
++ sha256 = 0100663380a3bd977b001183cd487412db7aad9de6859927bde97e1e6e44e645
++ 
++ [download.any(os=linux,os=freebsd)]
++-url = https://github.com/Kitware/CMake/releases/download/v3.20.2/cmake-3.20.2.tar.gz
++-sha256 = aecf6ecb975179eb3bb6a4a50cae192d41e92b9372b02300f9e8f1d5f559544e
+++url = https://github.com/Kitware/CMake/releases/download/v3.22.0/cmake-3.22.0.tar.gz
+++sha256 = 932c038361dc8d9701ee93cb029a877bc0ec3cc1999da4006d006bcbdd748c9
++ 
++ [build.os=windows]
++ builder = nop
++@@ -40,7 +40,7 @@ CMake.app/Contents/share = share
++ 
++ [build.any(os=linux,os=freebsd)]
++ builder = cmakebootstrap
++-subdir = cmake-3.20.2
+++subdir = cmake-3.22.0
++ 
++ [make.install_args.any(os=linux,os=freebsd)]
++ install
+diff --git a/patches/fbcode_builder/0003-libsodium-1.0.18.patch b/patches/fbcode_builder/0003-libsodium-1.0.18.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..87c2a56a340011d6092f3ab13f265e0b154fea04
+--- /dev/null
++++ b/patches/fbcode_builder/0003-libsodium-1.0.18.patch
+@@ -0,0 +1,26 @@
++--- a/build/fbcode_builder/manifests/libsodium
+++++ b/build/fbcode_builder/manifests/libsodium
++@@ -12,16 +12,18 @@ libsodium-devel
++ libsodium-static
++ 
++ [download.not(os=windows)]
++-url = https://github.com/jedisct1/libsodium/releases/download/1.0.17/libsodium-1.0.17.tar.gz
++-sha256 = 0cc3dae33e642cc187b5ceb467e0ad0e1b51dcba577de1190e9ffa17766ac2b1
+++# 1.0.17 GitHub release assets were removed; use 1.0.18 (same autoconf layout).
+++url = https://github.com/jedisct1/libsodium/releases/download/1.0.18-RELEASE/libsodium-1.0.18.tar.gz
+++sha256 = 6f504490b342a4f8a4c4a02fc9b866cbef8622d5df4e5452b46be121e46636c1
++ 
++ [build.not(os=windows)]
++ builder = autoconf
++-subdir = libsodium-1.0.17
+++subdir = libsodium-1.0.18
++ 
++ [download.os=windows]
++-url = https://download.libsodium.org/libsodium/releases/libsodium-1.0.17-msvc.zip
++-sha256 = f0f32ad8ebd76eee99bb039f843f583f2babca5288a8c26a7261db9694c11467
+++# Official download.libsodium.org no longer hosts 1.0.17 MSVC zip; use GitHub release.
+++url = https://github.com/jedisct1/libsodium/releases/download/1.0.18-RELEASE/libsodium-1.0.18-msvc.zip
+++sha256 = c1d48d85c9361e350931ffe5067559cd7405a697c655d26955fb568d1084a5f4
++ 
++ [build.os=windows]
++ builder = nop
+diff --git a/patches/fbcode_builder/0004-fbthrift-xxhash-dep.patch b/patches/fbcode_builder/0004-fbthrift-xxhash-dep.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..af68818cffad5c1e2902fe4c3941a67aad9c3662
+--- /dev/null
++++ b/patches/fbcode_builder/0004-fbthrift-xxhash-dep.patch
+@@ -0,0 +1,10 @@
++--- a/build/fbcode_builder/manifests/fbthrift
+++++ b/build/fbcode_builder/manifests/fbthrift
++@@ -25,6 +25,7 @@ googletest
++ libsodium
++ python-six
++ wangle
+++xxhash
++ zstd
++ # Thrift also depends on openssl but since the latter requires a platform-
++ # specific configuration we rely on the folly manifest to provide this
+diff --git a/patches/fbcode_builder/0006-fbthrift-cpp-only-no-cargo.patch b/patches/fbcode_builder/0006-fbthrift-cpp-only-no-cargo.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..cf615fce0325cb5ec94bbd4f228e5a793b65fc85
+--- /dev/null
++++ b/patches/fbcode_builder/0006-fbthrift-cpp-only-no-cargo.patch
+@@ -0,0 +1,18 @@
++--- a/build/fbcode_builder/manifests/fbthrift
+++++ b/build/fbcode_builder/manifests/fbthrift
++@@ -4,16 +4,9 @@ shipit_project = fbthrift
++ shipit_fbcode_builder = true
++ 
++-[git]
++-repo_url = https://github.com/facebook/fbthrift.git
++-
++-[cargo]
++-cargo_config_file =  source/thrift/lib/rust/.cargo/config
++-
++-[crate.pathmap]
++-fbthrift = thrift/lib/rust
++-
+++# C++ build via build.sh --src-dir; skip [cargo] (copytree of .git blows disk).
++ [build]
++ builder = cmake
++ job_weight_mib = 2048
+diff --git a/patches/fbcode_builder/0007-boost-linux-fPIC.patch b/patches/fbcode_builder/0007-boost-linux-fPIC.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..dd6916b79dc20a693b428db7da65d7022ae95401
+--- /dev/null
++++ b/patches/fbcode_builder/0007-boost-linux-fPIC.patch
+@@ -0,0 +1,12 @@
++--- a/build/fbcode_builder/manifests/boost
+++++ b/build/fbcode_builder/manifests/boost
++@@ -101,6 +101,10 @@ toolset=clang
++ # RHEL hardened gcc is not compatible with PCH
++ # https://bugzilla.redhat.com/show_bug.cgi?id=1806545
++ pch=off
+++cflags=-fPIC
+++cxxflags=-fPIC
+++linkflags=-fPIC
++ 
++ [b2.args.os=darwin]
++ toolset=clang
+diff --git a/patches/fbcode_builder/overlay/CMake/FindXxhash.cmake b/patches/fbcode_builder/overlay/CMake/FindXxhash.cmake
+new file mode 100644
+index 0000000000000000000000000000000000000000..fb937a9c917634d9175f6b10aa205c8a45c6e01c
+--- /dev/null
++++ b/patches/fbcode_builder/overlay/CMake/FindXxhash.cmake
+@@ -0,0 +1,40 @@
++# Copyright (c) Facebook, Inc. and its affiliates.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++#
++# - Try to find Facebook xxhash library
++# This will define
++# Xxhash_FOUND
++# Xxhash_INCLUDE_DIR
++# Xxhash_LIBRARY
++#
++
++find_path(Xxhash_INCLUDE_DIR NAMES xxhash.h)
++
++find_library(Xxhash_LIBRARY_RELEASE NAMES xxhash)
++
++include(SelectLibraryConfigurations)
++SELECT_LIBRARY_CONFIGURATIONS(Xxhash)
++
++include(FindPackageHandleStandardArgs)
++FIND_PACKAGE_HANDLE_STANDARD_ARGS(
++  Xxhash DEFAULT_MSG
++  Xxhash_LIBRARY Xxhash_INCLUDE_DIR
++)
++
++if (Xxhash_FOUND)
++  message(STATUS "Found xxhash: ${Xxhash_LIBRARY}")
++endif()
++
++mark_as_advanced(Xxhash_INCLUDE_DIR Xxhash_LIBRARY)
+diff --git a/patches/fbcode_builder/overlay/manifests/xxhash b/patches/fbcode_builder/overlay/manifests/xxhash
+new file mode 100644
+index 0000000000000000000000000000000000000000..80064f2827ca0fb99bb2c37680db5f1ee296bddc
+--- /dev/null
++++ b/patches/fbcode_builder/overlay/manifests/xxhash
+@@ -0,0 +1,23 @@
++[manifest]
++name = xxhash
++
++[download]
++url = https://github.com/Cyan4973/xxHash/archive/refs/tags/v0.8.3.tar.gz
++sha256 = aae608dfe8213dfd05d909a57718ef82f30722c392344583d3f39050c7f29a80
++
++[rpms]
++xxhash-devel
++
++[debs]
++libxxhash-dev
++xxhash
++
++[homebrew]
++xxhash
++
++[build]
++builder = cmake
++subdir = xxHash-0.8.3/cmake_unofficial
++
++[cmake.defines]
++CMAKE_POSITION_INDEPENDENT_CODE = ON
 diff --git a/run_coverage.sh b/run_coverage.sh
 new file mode 100644
-index 0000000000000000000000000000000000000000..9f07980ad8aa7e10da045392ed0ef3ee394e2f7f
+index 0000000000000000000000000000000000000000..8e76717f89dfc85b6fb87a44a7e14e80a18e764f
 --- /dev/null
 +++ b/run_coverage.sh
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,368 @@
 +#!/bin/bash
 +set -u -o pipefail
 +export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:${PATH:-}"
-+if ! command -v git >/dev/null 2>&1; then apt-get update -qq 2>/dev/null; apt-get install -y -qq git 2>/dev/null; fi
++if ! command -v git >/dev/null 2>&1; then apt-get update 2>&1 || true; apt-get install -y -qq git 2>/dev/null; fi
 +BASE_SHA="${1:-HEAD~1}"
 +MIN_COVERAGE="${2:-80}"
 +TEST_TARGETS_ARG="${3:-}"
@@ -64,10 +828,10 @@ index 0000000000000000000000000000000000000000..9f07980ad8aa7e10da045392ed0ef3ee
 +echo "=== 换源 ==="
 +cat > /etc/apt/sources.list << 'EOF'
 +deb https://mirrors.tuna.tsinghua.edu.cn/debian bookworm main contrib non-free non-free-firmware
-+deb https://mirrors.tuna.tsinghua.edu.cn/debian bookworm-updates main contrib non-free non-free non-free-firmware
++deb https://mirrors.tuna.tsinghua.edu.cn/debian bookworm-updates main contrib non-free non-free-firmware
 +deb http://mirrors.aliyun.com/debian-security bookworm-security main contrib non-free non-free-firmware
 +EOF
-+apt-get update -qq 2>/dev/null
++apt-get update 2>&1 || true
 +if ! grep -q 'gh-proxy.test.osinfra.cn' /root/.gitconfig 2>/dev/null; then
 +  cat >> /root/.gitconfig << 'EOF'
 +[url "https://gh-proxy.test.osinfra.cn/https://github.com/"]
@@ -77,10 +841,10 @@ index 0000000000000000000000000000000000000000..9f07980ad8aa7e10da045392ed0ef3ee
 +echo "  源已切换"
 +echo ""
 +echo "=== Step 0: 安装依赖 ==="
-+apt-get update -qq 2>/dev/null
++apt-get update 2>&1 || true
 +for pkg in libboost-all-dev libdouble-conversion-dev libgflags-dev libgoogle-glog-dev libevent-dev libsodium-dev liblz4-dev libsnappy-dev liblzma-dev libgtest-dev libgmock-dev libssl-dev libaio-dev make clang-16 cmake clang libunwind-dev libdwarf-dev binutils-dev libiberty-dev zlib1g-dev libbz2-dev unzip libzstd-dev libfmt-dev python3 python3-six cython3 libxxhash-dev; do
 +  if ! apt-get install -y --fix-missing "$pkg" >/tmp/apt_install.log 2>&1; then
-+    apt-get update -qq 2>/dev/null
++    apt-get update 2>&1 || true
 +    apt-get install -y --fix-missing "$pkg" >/tmp/apt_install.log 2>&1 || echo "  警告: $pkg 安装失败"
 +  fi
 +done
@@ -122,6 +886,8 @@ index 0000000000000000000000000000000000000000..9f07980ad8aa7e10da045392ed0ef3ee
 +echo ""
 +echo "=== Step 1: 增量文件 ==="
 +resolve_base() {
++  if [ -n "${CI_MERGE_REQUEST_DIFF_BASE_SHA:-}" ] && git rev-parse --verify "$CI_MERGE_REQUEST_DIFF_BASE_SHA^{commit}" >/dev/null 2>&1; then BASE_SHA="$CI_MERGE_REQUEST_DIFF_BASE_SHA"; return 0; fi
++  if [ -n "${CI_MERGE_REQUEST_TARGET_BRANCH_SHA:-}" ] && git rev-parse --verify "$CI_MERGE_REQUEST_TARGET_BRANCH_SHA^{commit}" >/dev/null 2>&1; then BASE_SHA="$CI_MERGE_REQUEST_TARGET_BRANCH_SHA"; return 0; fi
 +  git rev-parse --verify "$BASE_SHA^{commit}" >/dev/null 2>&1 && return 0
 +  git rev-parse --verify "origin/$BASE_SHA^{commit}" >/dev/null 2>&1 && { BASE_SHA="origin/$BASE_SHA"; return 0; }
 +  git rev-parse --verify "refs/remotes/origin/$BASE_SHA^{commit}" >/dev/null 2>&1 && { BASE_SHA="refs/remotes/origin/$BASE_SHA"; return 0; }
@@ -130,18 +896,30 @@ index 0000000000000000000000000000000000000000..9f07980ad8aa7e10da045392ed0ef3ee
 +    if echo "$ref" | grep -q "/$BASE_SHA$"; then BASE_SHA="$ref"; return 0; fi
 +  done
 +  for remote in $(git remote 2>/dev/null); do
-+    git fetch "$remote" "$BASE_SHA" 2>/dev/null || true
++    if git fetch "$remote" "$BASE_SHA" 2>/dev/null; then
++      git rev-parse --verify "FETCH_HEAD^{commit}" >/dev/null 2>&1 && { BASE_SHA="FETCH_HEAD"; return 0; }
++    fi
 +    git fetch "$remote" 2>/dev/null || true
 +    git rev-parse --verify "$BASE_SHA^{commit}" >/dev/null 2>&1 && return 0
 +    git rev-parse --verify "$remote/$BASE_SHA^{commit}" >/dev/null 2>&1 && { BASE_SHA="$remote/$BASE_SHA"; return 0; }
 +  done
 +  return 1
 +}
-+if ! resolve_base; then echo "ERROR: 基线 $BASE_SHA 不存在"; echo "RESULT: FAIL"; exit 1; fi
++if ! resolve_base; then
++  FALLBACK_INC=$(git -C "$SRC_DIR" diff --name-only "HEAD~1" "$HEAD_SHA" -- '*.cpp' '*.cc' 2>/dev/null | grep -v '/test/' | grep -v '/tests/' | grep -v '/benchmarks/' | grep -v '/tool/' | grep -v '/examples/' || true)
++  if [ -z "$FALLBACK_INC" ]; then
++    echo "  无法解析基线，但本分支未涉及源码文件修改，跳过覆盖率检查。"
++    echo "RESULT: SKIP"
++    exit 0
++  fi
++  echo "ERROR: 基线 $BASE_SHA 不存在"; echo "RESULT: FAIL"; exit 1
++fi
 +INCREMENTAL_CPP=$(git -C "$SRC_DIR" diff --name-only "$BASE_SHA" "$HEAD_SHA" -- '*.cpp' '*.cc' 2>/dev/null | grep -v '/test/' | grep -v '/tests/' | grep -v '/benchmarks/' | grep -v '/tool/' | grep -v '/examples/' || true)
 +if [ -z "$INCREMENTAL_CPP" ]; then echo "没有增量源文件，跳过。"; echo "RESULT: SKIP"; exit 0; fi
 +mapfile -t INCREMENTAL_FILES <<< "$INCREMENTAL_CPP"
 +for f in "${INCREMENTAL_FILES[@]}"; do echo "  $f"; done
++ADDED_LINES=$(git -C "$SRC_DIR" diff "$BASE_SHA" "$HEAD_SHA" -- "${INCREMENTAL_FILES[@]}" 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+' | wc -l)
++if [ "$ADDED_LINES" -eq 0 ]; then echo "  无新增代码行（纯删除），跳过增量覆盖率检查。"; echo "RESULT: SKIP"; exit 0; fi
 +echo ""
 +echo "=== Step 2: 构建依赖 ==="
 +cd "$SRC_DIR"
@@ -234,9 +1012,9 @@ index 0000000000000000000000000000000000000000..9f07980ad8aa7e10da045392ed0ef3ee
 +      if [ "$matched" = false ]; then
 +        no_test=$(echo "$base" | sed 's/Test$//' | sed 's/test$//'); keywords=$(echo "$no_test" | sed 's/\([A-Z]\)/ \1/g' | tr 'A-Z' 'a-z' | tr ' ' '\n' | grep -v '^$' | grep -v '^.$' | tr '\n' ' ')
 +        for t in $ALL_TARGETS; do
++          [ "$t" = "test" ] && continue
 +          t_lower=$(echo "$t" | tr 'A-Z' 'a-z')
 +          if ! echo "$t_lower" | grep -q 'test'; then continue; fi
-+          if [ ! -d "CMakeFiles/${t}.dir" ]; then continue; fi
 +          match=true
 +          for kw in $keywords; do if ! echo "$t_lower" | grep -q "$kw"; then match=false; break; fi; done
 +          if [ "$match" = "true" ]; then TARGETS+=("$t"); echo "    $tf -> $t (模糊匹配)"; matched=true; MATCHED_FILES="$MATCHED_FILES $tf"; break; fi
@@ -250,8 +1028,8 @@ index 0000000000000000000000000000000000000000..9f07980ad8aa7e10da045392ed0ef3ee
 +  if [ -n "$UNMATCHED" ] || [ ${#TARGETS[@]} -eq 0 ]; then
 +    echo "  有测试文件未匹配到，编译所有测试目标..."
 +    for t in $ALL_TARGETS; do
++      [ "$t" = "test" ] && continue
 +      t_lower=$(echo "$t" | tr 'A-Z' 'a-z')
-+      if [ ! -d "CMakeFiles/${t}.dir" ]; then continue; fi
 +      if echo "$t_lower" | grep -q 'test'; then
 +        found_existing=false
 +        for existing in "${TARGETS[@]}"; do [ "$existing" = "$t" ] && found_existing=true && break; done
@@ -793,7 +1571,7 @@ index c4d87a3332d79a8d9f9efb501bc8ded589ed2c0b..182a27417fb40049c8db72c542f839c3
  #include <ostream>
  #include <sstream>
 diff --git a/thrift/lib/cpp/CMakeLists.txt b/thrift/lib/cpp/CMakeLists.txt
-index 678ce38b41b0454261b2e4c31ad7c9cfb10c883d..cf38acc44b863d1fe0ea0bda627175a854342fff 100644
+index 678ce38b41b0454261b2e4c31ad7c9cfb10c883d..4ad223bbb8f01c8158b62b0d32cefd2c3d3b1891 100644
 --- a/thrift/lib/cpp/CMakeLists.txt
 +++ b/thrift/lib/cpp/CMakeLists.txt
 @@ -48,6 +48,14 @@ target_link_libraries(
@@ -811,19 +1589,38 @@ index 678ce38b41b0454261b2e4c31ad7c9cfb10c883d..cf38acc44b863d1fe0ea0bda627175a8
  add_library(
    transport
  
+@@ -81,6 +89,16 @@ target_link_libraries(
+     ${ZSTD_LIBRARIES}
+ )
+ 
++if(enable_tests)
++  thrift_gtest(
++    theader_resource_limits
++    transport/test/THeaderResourceLimitsTest.cpp
++    "-Wl,--start-group"
++    transport thriftprotocol rpcmetadata thrift-core
++    "-Wl,--end-group"
++  )
++endif()
++
+ add_library(
+   async
+ 
 diff --git a/thrift/lib/cpp/concurrency/ThreadManager.cpp b/thrift/lib/cpp/concurrency/ThreadManager.cpp
-index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179297ceca5 100644
+index ac0e95e91f62048534472026742c6f9a65ef3263..756dc69f3e456a549b4b35bf1742f5d1e8ea4fe4 100644
 --- a/thrift/lib/cpp/concurrency/ThreadManager.cpp
 +++ b/thrift/lib/cpp/concurrency/ThreadManager.cpp
-@@ -24,6 +24,7 @@
+@@ -23,7 +23,9 @@
+ #include <mutex>
  #include <queue>
  #include <set>
++#include <stdexcept>
  #include <string>
 +#include <variant>
  
  #include <glog/logging.h>
  
-@@ -50,6 +51,11 @@
+@@ -50,11 +52,37 @@
  FOLLY_GFLAGS_DEFINE_bool(
      codel_enabled, false, "Enable codel queue timeout algorithm");
  
@@ -835,7 +1632,33 @@ index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179
  namespace apache {
  namespace thrift {
  namespace concurrency {
-@@ -172,20 +178,56 @@ class ThreadManager::Task {
+ 
+ namespace {
++size_t checkedExecutorIndex(PRIORITY priority, ThreadManager::Source source) {
++  // N_PRIORITIES represents an unspecified priority, not an executor slot.
++  if (priority == PRIORITY::N_PRIORITIES) {
++    priority = PRIORITY::NORMAL;
++  }
++  if (static_cast<unsigned>(priority) >= N_PRIORITIES ||
++      static_cast<unsigned>(source) >= ThreadManager::N_SOURCES) {
++    throw std::invalid_argument("Invalid ThreadManager priority or source");
++  }
++  return static_cast<size_t>(priority) * ThreadManager::N_SOURCES +
++      static_cast<size_t>(source);
++}
++
++std::shared_ptr<folly::Executor> wrapExecutor(
++    folly::Executor::KeepAlive<> executor) {
++  if (!executor) {
++    throw std::invalid_argument("ThreadManager executor must not be null");
++  }
++  return std::make_shared<folly::VirtualExecutor>(std::move(executor));
++}
++
+ /* Translates from wangle priorities (normal at 0, higher is higher)
+    to thrift priorities */
+ PRIORITY translatePriority(int8_t priority) {
+@@ -172,20 +200,56 @@ class ThreadManager::Task {
          context_(folly::RequestContext::saveContext()),
          qpriority_(qpriority) {}
  
@@ -896,7 +1719,7 @@ index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179
  
    std::chrono::steady_clock::time_point getExpireTime() const {
      return expireTime_;
-@@ -208,7 +250,7 @@ class ThreadManager::Task {
+@@ -208,7 +272,7 @@ class ThreadManager::Task {
    size_t queuePriority() const { return qpriority_; }
  
   private:
@@ -905,7 +1728,7 @@ index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179
    std::chrono::steady_clock::time_point queueBeginTime_;
    std::chrono::steady_clock::time_point expireTime_;
    std::shared_ptr<folly::RequestContext> context_;
-@@ -310,7 +352,11 @@ class ThreadManager::Impl : public ThreadManager,
+@@ -310,7 +374,11 @@ class ThreadManager::Impl : public ThreadManager,
     * Implements folly::Executor::add()
     */
    void add(folly::Func f) override {
@@ -918,7 +1741,7 @@ index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179
    }
  
    void remove(std::shared_ptr<Runnable> task) override;
-@@ -350,6 +396,12 @@ class ThreadManager::Impl : public ThreadManager,
+@@ -350,6 +418,12 @@ class ThreadManager::Impl : public ThreadManager,
  
    std::chrono::nanoseconds getUsedCpuTime() const override;
  
@@ -931,7 +1754,17 @@ index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179
   protected:
    void add(
        size_t priority,
-@@ -455,7 +507,11 @@ class SimpleThreadManagerImpl : public ThreadManager::Impl {
+@@ -448,14 +522,18 @@ class SimpleThreadManagerImpl : public ThreadManager::Impl {
+     addWorker(workerCount_);
+   }
+ 
+-  KeepAlive<> getKeepAlive(ExecutionScope, Source source) const override {
+-    DCHECK(static_cast<uint8_t>(source) < executors_.size());
+-    return getKeepAliveToken(*executors_[static_cast<uint8_t>(source)]);
++  KeepAlive<> getKeepAlive(ExecutionScope es, Source source) const override {
++    const auto idx = checkedExecutorIndex(es.getPriority(), source) % N_SOURCES;
++    return getKeepAliveToken(*executors_[idx]);
+   }
  
    void addWithPriorityAndSource(folly::Func f, PRIORITY pri, Source source) {
      DCHECK(pri == PRIORITY::NORMAL);
@@ -944,7 +1777,7 @@ index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179
    }
  
   private:
-@@ -884,6 +940,38 @@ void ThreadManager::Impl::add(
+@@ -884,6 +962,38 @@ void ThreadManager::Impl::add(
    }
  }
  
@@ -983,7 +1816,7 @@ index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179
  void ThreadManager::Impl::remove(std::shared_ptr<Runnable> /*task*/) {
    std::unique_lock<std::mutex> l(mutex_);
    if (state_ != ThreadManager::STARTED) {
-@@ -946,7 +1034,6 @@ std::unique_ptr<ThreadManager::Task> ThreadManager::Impl::waitOnTask() {
+@@ -946,7 +1056,6 @@ std::unique_ptr<ThreadManager::Task> ThreadManager::Impl::waitOnTask() {
    }
  
    // Otherwise, no tasks on the horizon, so go sleep
@@ -991,7 +1824,7 @@ index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179
    if (shouldStop()) {
      // check again because it might have changed by the time we got the mutex
      return nullptr;
-@@ -954,11 +1041,9 @@ std::unique_ptr<ThreadManager::Task> ThreadManager::Impl::waitOnTask() {
+@@ -954,11 +1063,9 @@ std::unique_ptr<ThreadManager::Task> ThreadManager::Impl::waitOnTask() {
  
    ++idleCount_;
    --totalTaskCount_;
@@ -1003,7 +1836,7 @@ index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179
        --idleCount_;
        ++totalTaskCount_;
        return nullptr;
-@@ -1191,7 +1276,11 @@ class PriorityThreadManager::PriorityImpl
+@@ -1191,12 +1298,15 @@ class PriorityThreadManager::PriorityImpl
    }
  
    void addWithPriorityAndSource(folly::Func f, PRIORITY pri, Source source) {
@@ -1016,7 +1849,13 @@ index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179
    }
  
    KeepAlive<> getKeepAlive(ExecutionScope es, Source source) const override {
-@@ -1204,7 +1293,12 @@ class PriorityThreadManager::PriorityImpl
+-    size_t idx = es.getPriority() * N_SOURCES + static_cast<uint8_t>(source);
+-    DCHECK(idx < executors_.size());
++    const auto idx = checkedExecutorIndex(es.getPriority(), source);
+     return getKeepAliveToken(*executors_[idx]);
+   }
+ 
+@@ -1204,7 +1314,12 @@ class PriorityThreadManager::PriorityImpl
     * Implements folly::Executor::add()
     */
    void add(folly::Func f) override {
@@ -1030,7 +1869,7 @@ index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179
    }
  
    /**
-@@ -1218,7 +1312,11 @@ class PriorityThreadManager::PriorityImpl
+@@ -1218,7 +1333,11 @@ class PriorityThreadManager::PriorityImpl
     */
    void addWithPriority(folly::Func f, int8_t priority) override {
      auto prio = translatePriority(priority);
@@ -1043,7 +1882,7 @@ index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179
    }
  
    template <typename T>
-@@ -1334,7 +1432,7 @@ class PriorityThreadManager::PriorityImpl
+@@ -1334,7 +1453,7 @@ class PriorityThreadManager::PriorityImpl
          pri, source, this);
    }
  
@@ -1052,7 +1891,7 @@ index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179
    size_t counts_[N_PRIORITIES];
    mutable std::mutex mutex_;
    std::vector<std::unique_ptr<Executor, Deleter>> executors_;
-@@ -1380,12 +1478,20 @@ class PriorityQueueThreadManager : public ThreadManager::Impl {
+@@ -1380,12 +1499,20 @@ class PriorityQueueThreadManager : public ThreadManager::Impl {
      // and we want to prioritize inflight requests over admitting new request.
      // arguably, we may even want a priority above the max we ever allow for
      // initial queueing
@@ -1079,7 +1918,7 @@ index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179
    }
  
    /**
-@@ -1393,12 +1499,20 @@ class PriorityQueueThreadManager : public ThreadManager::Impl {
+@@ -1393,12 +1520,20 @@ class PriorityQueueThreadManager : public ThreadManager::Impl {
     */
    void addWithPriority(folly::Func f, int8_t priority) override {
      auto prio = translatePriority(priority);
@@ -1106,7 +1945,7 @@ index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179
    }
  
    uint8_t getNumPriorities() const override { return N_PRIORITIES; }
-@@ -1409,7 +1523,11 @@ class PriorityQueueThreadManager : public ThreadManager::Impl {
+@@ -1409,12 +1544,15 @@ class PriorityQueueThreadManager : public ThreadManager::Impl {
    }
  
    void addWithPriorityAndSource(folly::Func f, PRIORITY pri, Source source) {
@@ -1119,6 +1958,63 @@ index ac0e95e91f62048534472026742c6f9a65ef3263..7d118af498231a0edae71dfd044dc179
    }
  
    KeepAlive<> getKeepAlive(ExecutionScope es, Source source) const override {
+-    size_t idx = es.getPriority() * N_SOURCES + static_cast<uint8_t>(source);
+-    DCHECK(idx < executors_.size());
++    const auto idx = checkedExecutorIndex(es.getPriority(), source);
+     return getKeepAliveToken(*executors_[idx]);
+   }
+ 
+@@ -1453,14 +1591,13 @@ std::array<T, N> fillArrayWith(const T& t) {
+ 
+ constexpr auto N_SOURCES = ThreadManager::N_SOURCES;
+ int idxFromPriSrc(int pri, int source) {
+-  DCHECK(pri < N_PRIORITIES);
++  if (static_cast<unsigned>(pri) >= N_PRIORITIES ||
++      static_cast<unsigned>(source) >= N_SOURCES) {
++    throw std::invalid_argument("Invalid ThreadManager priority or source");
++  }
+   return pri * N_SOURCES + source;
+ }
+ 
+-int idxFromPriSrc(PRIORITY pri, ThreadManager::Source source) {
+-  return idxFromPriSrc(static_cast<int>(pri), static_cast<int>(source));
+-}
+-
+ template <typename F>
+ void forEachThreadManager(
+     const std::array<folly::Executor*, N_PRIORITIES * N_SOURCES>& executors,
+@@ -1482,7 +1619,7 @@ ThreadManagerExecutorAdapter::ThreadManagerExecutorAdapter(
+ ThreadManagerExecutorAdapter::ThreadManagerExecutorAdapter(
+     folly::Executor::KeepAlive<> ka, Options opts)
+     : ThreadManagerExecutorAdapter(
+-          std::make_shared<folly::VirtualExecutor>(std::move(ka)),
++          wrapExecutor(std::move(ka)),
+           std::move(opts)) {}
+ 
+ ThreadManagerExecutorAdapter::ThreadManagerExecutorAdapter(
+@@ -1600,7 +1737,8 @@ void ThreadManagerExecutorAdapter::add(folly::Func f) {
+ 
+ folly::Executor::KeepAlive<> ThreadManagerExecutorAdapter::getKeepAlive(
+     ExecutionScope es, Source source) const {
+-  return getKeepAliveToken(executors_[idxFromPriSrc(es.getPriority(), source)]);
++  return getKeepAliveToken(
++      executors_[checkedExecutorIndex(es.getPriority(), source)]);
+ }
+ 
+ namespace {
+diff --git a/thrift/lib/cpp/concurrency/ThreadManager.h b/thrift/lib/cpp/concurrency/ThreadManager.h
+index 676036b2628f1985e038271e2093ddc7ebd1b972..15786daf0070b5563a9cac79d9d576ca2a4b6402 100644
+--- a/thrift/lib/cpp/concurrency/ThreadManager.h
++++ b/thrift/lib/cpp/concurrency/ThreadManager.h
+@@ -306,6 +306,8 @@ class ThreadManager : public virtual folly::Executor {
+     std::optional<uint32_t> tenant_id_;
+   };
+ 
++  // Built-in managers use NORMAL for an unspecified (N_PRIORITIES) priority
++  // and reject other out-of-range priority/source values with invalid_argument.
+   [[nodiscard]] virtual KeepAlive<> getKeepAlive(
+       ExecutionScope es, Source level) const = 0;
+ 
 diff --git a/thrift/lib/cpp/concurrency/test/ThreadManagerDirectFuncTest.cpp b/thrift/lib/cpp/concurrency/test/ThreadManagerDirectFuncTest.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..b448b877102ceb412d498b83e8d14d0d4c096a97
@@ -1336,10 +2232,10 @@ index 0000000000000000000000000000000000000000..b448b877102ceb412d498b83e8d14d0d
 +
 +} // namespace
 diff --git a/thrift/lib/cpp/transport/THeader.cpp b/thrift/lib/cpp/transport/THeader.cpp
-index 792e9f7c8c016a06034752b8cb43d352d0798925..0234fb2acd929a54b46e6dbe55a739720117c29c 100644
+index 792e9f7c8c016a06034752b8cb43d352d0798925..5e0ab81a80e54e62eb6d46ebb7fa7f5c33fc37ad 100644
 --- a/thrift/lib/cpp/transport/THeader.cpp
 +++ b/thrift/lib/cpp/transport/THeader.cpp
-@@ -16,6 +16,15 @@
+@@ -16,10 +16,20 @@
  
  #include <thrift/lib/cpp/transport/THeader.h>
  
@@ -1355,7 +2251,25 @@ index 792e9f7c8c016a06034752b8cb43d352d0798925..0234fb2acd929a54b46e6dbe55a73972
  #include <fmt/core.h>
  #include <folly/Conv.h>
  #include <folly/ExceptionString.h>
-@@ -278,18 +287,15 @@ unique_ptr<IOBuf> THeader::removeNonHeader(
+ #include <folly/MapUtil.h>
++#include <folly/ScopeGuard.h>
+ #include <folly/String.h>
+ #include <folly/compression/Compression.h>
+ #include <folly/io/Cursor.h>
+@@ -36,8 +46,12 @@
+ #include <thrift/lib/cpp2/protocol/Serializer.h>
+ #include <thrift/lib/cpp2/transport/rocket/framing/Util.h>
+ 
++#include <zlib.h>
++#include <zstd.h>
+ #include <algorithm>
++#include <array>
+ #include <cassert>
++#include <stdexcept>
+ #include <string>
+ 
+ using std::map;
+@@ -278,18 +292,15 @@ unique_ptr<IOBuf> THeader::removeNonHeader(
  unique_ptr<IOBuf> THeader::removeHeader(
      IOBufQueue* queue,
      size_t& needed,
@@ -1378,7 +2292,7 @@ index 792e9f7c8c016a06034752b8cb43d352d0798925..0234fb2acd929a54b46e6dbe55a73972
    size_t frameSizeBytes = 4;
    needed = 0;
  
-@@ -311,6 +317,7 @@ unique_ptr<IOBuf> THeader::removeHeader(
+@@ -311,6 +322,7 @@ unique_ptr<IOBuf> THeader::removeHeader(
      unique_ptr<IOBuf> buf =
          THeader::removeNonHeader(queue, needed, clientType_, sz32);
      if (buf) {
@@ -1386,7 +2300,7 @@ index 792e9f7c8c016a06034752b8cb43d352d0798925..0234fb2acd929a54b46e6dbe55a73972
        return buf;
      }
    }
-@@ -318,7 +325,12 @@ unique_ptr<IOBuf> THeader::removeHeader(
+@@ -318,7 +330,12 @@ unique_ptr<IOBuf> THeader::removeHeader(
    auto clientT = THeader::analyzeFirst32bit(sz32);
    if (clientT) {
      clientType_ = *clientT;
@@ -1400,7 +2314,7 @@ index 792e9f7c8c016a06034752b8cb43d352d0798925..0234fb2acd929a54b46e6dbe55a73972
    }
  
    size_t sz;
-@@ -380,6 +392,7 @@ unique_ptr<IOBuf> THeader::removeHeader(
+@@ -380,6 +397,7 @@ unique_ptr<IOBuf> THeader::removeHeader(
    unique_ptr<IOBuf> buf =
        THeader::removeNonHeader(queue, needed, clientType_, sz);
    if (buf) {
@@ -1408,7 +2322,7 @@ index 792e9f7c8c016a06034752b8cb43d352d0798925..0234fb2acd929a54b46e6dbe55a73972
      return buf;
    }
  
-@@ -401,6 +414,7 @@ unique_ptr<IOBuf> THeader::removeHeader(
+@@ -401,46 +419,90 @@ unique_ptr<IOBuf> THeader::removeHeader(
    // Trim off the frame size.
    queue->trimStart(frameSizeBytes);
    buf = readHeaderFormat(queue->split(sz), persistentReadHeaders);
@@ -1416,11 +2330,551 @@ index 792e9f7c8c016a06034752b8cb43d352d0798925..0234fb2acd929a54b46e6dbe55a73972
  
    return buf;
  }
+ 
+-static string getString(RWPrivateCursor& c, size_t sz) {
+-  if (!c.canAdvance(sz)) {
++namespace {
++[[noreturn]] void headerLimitExceeded(const char* message) {
++  throw TTransportException(TTransportException::INVALID_FRAME_SIZE, message);
++}
++
++// Non-owning staging: keys/values refer to the bounded metadata buffer or the
++// old persistent map. Owning strings are allocated only after all quotas pass.
++using HeaderViews = std::map<std::string_view, std::string_view>;
++
++void setHeaderView(
++    HeaderViews& headers,
++    uint64_t& bytes,
++    std::string_view key,
++    std::string_view value,
++    uint64_t maxBytes,
++    size_t maxEntries) {
++  auto it = headers.find(key);
++  const bool replacing = it != headers.end();
++  const uint64_t base =
++      replacing ? bytes - it->first.size() - it->second.size() : bytes;
++  if ((!replacing && headers.size() >= maxEntries) || base > maxBytes ||
++      key.size() > maxBytes - base ||
++      value.size() > maxBytes - base - key.size()) {
++    headerLimitExceeded("Header key/value budget exceeded");
++  }
++  if (replacing) {
++    it->second = value;
++  } else {
++    headers.emplace(key, value);
++  }
++  bytes = base + key.size() + value.size();
++}
++
++std::string_view readHeaderString(Cursor& c) {
++  const auto size = readVarint<uint32_t>(c);
++  if (!c.canAdvance(size)) {
+     throw TTransportException(
+         TTransportException::CORRUPTED_DATA,
+-        folly::stringPrintf(
+-            "String size %zu is larger than available %zu bytes",
+-            sz,
+-            c.totalLength()));
++        "Header string extends beyond declared header region");
++  }
++  // The metadata-only buffer is contiguous, never the unbounded payload.
++  std::string_view result(reinterpret_cast<const char*>(c.data()), size);
++  c.skip(size);
++  return result;
++}
++
++void readInfoHeaders(
++    Cursor& c,
++    HeaderViews& headers,
++    uint64_t& bytes,
++    uint64_t maxBytes,
++    size_t maxEntries) {
++  auto count = readVarint<uint32_t>(c);
++  if (count > c.totalLength() / 2) {
++    throw TTransportException(
++        TTransportException::CORRUPTED_DATA, "Truncated Header key/value list");
++  }
++  while (count--) {
++    const auto key = readHeaderString(c);
++    const auto value = readHeaderString(c);
++    setHeaderView(headers, bytes, key, value, maxBytes, maxEntries);
+   }
+-  string str(sz, '\0');
+-  c.pull(&str[0], sz);
+-  return str;
+ }
+ 
+-/**
+- * Reads a string from ptr, taking care not to reach headerBoundary
+- * Advances ptr on success
+- *
+- * @param RWPrivateCursor        cursor to read from
+- */
+-static string readString(RWPrivateCursor& c) {
+-  return getString(c, readVarint<uint32_t>(c));
++THeader::StringToStringMap materializeHeaders(const HeaderViews& views) {
++  THeader::StringToStringMap result;
++  result.reserve(views.size());
++  for (const auto& entry : views) {
++    result.emplace(std::string(entry.first), std::string(entry.second));
++  }
++  return result;
+ }
++} // namespace
+ 
+-static void readInfoHeaders(
+-    RWPrivateCursor& c, THeader::StringToStringMap& headers_) {
+-  // Process key-value headers
+-  uint32_t numKVHeaders = readVarint<int32_t>(c);
+-  // continue until we reach (paded) end of packet
+-  while (numKVHeaders--) {
+-    // format: key; value
+-    // both: length (varint32); value (string)
+-    string key = readString(c);
+-    string value = readString(c);
+-    // save to headers
+-    headers_[key] = value;
++void THeader::ReadLimits::validate() const {
++  // Restrict windowLog to the portable ZSTD range; zero is never "unlimited".
++  if (!maxUncompressedBytes || !maxDecompressionWorkBytes ||
++      zstdWindowLogMax < 10 || zstdWindowLogMax > 30 || !maxHeaderBytes) {
++    throw std::invalid_argument("Invalid Header receive limits");
+   }
+ }
+ 
+@@ -452,34 +514,66 @@ unique_ptr<IOBuf> THeader::readHeaderFormat(
+   // magic(4), seqId(2), flags(2), headerSize(2)
+   const uint8_t commonHeaderSize = 10;
+ 
+-  RWPrivateCursor c(buf.get());
++  Cursor frame(buf.get());
+ 
+   // skip over already processed magic(4), seqId(4), headerSize(2)
+-  c += commonHeaderSize - 2; // advance to headerSize field
++  frame += commonHeaderSize - 2; // advance to headerSize field
+   // On the wire, headerSize is in 4 byte words.  See HeaderFormat.txt
+-  uint32_t headerSize = 4 * c.readBE<uint16_t>() + commonHeaderSize;
++  uint32_t headerSize = 4 * frame.readBE<uint16_t>() + commonHeaderSize;
+   if (headerSize > buf->computeChainDataLength()) {
+     throw TTransportException(
+         TTransportException::INVALID_FRAME_SIZE,
+         "Header size is larger than frame");
+   }
+-  Cursor data(buf.get());
+-  data += headerSize;
+-  protoId_ = readVarint<uint16_t>(c);
++  if (headerSize - commonHeaderSize > readLimits_.maxHeaderBytes) {
++    headerLimitExceeded("Header metadata budget exceeded");
++  }
++  // Clone ONLY the declared metadata region before coalescing. Every varint,
++  // key and value is now bounded independently of the following RPC payload.
++  std::unique_ptr<IOBuf> metadata;
++  frame.clone(metadata, headerSize - commonHeaderSize);
++  metadata->coalesce();
++  Cursor c(metadata.get());
++  const auto protocol = readVarint<uint16_t>(c);
+   uint16_t numTransforms = readVarint<uint16_t>(c);
+-  readTrans_.reserve(numTransforms);
+-
+-  uint16_t macSz = 0;
++  if (numTransforms > readLimits_.maxTransforms) {
++    headerLimitExceeded("Too many incoming Header transforms");
++  }
++  std::vector<uint16_t> transforms;
++  transforms.reserve(numTransforms);
++  auto writeTransforms = writeTrans_;
+ 
+   // For now all transforms consist of only the ID, not data.
+   for (int i = 0; i < numTransforms; i++) {
+-    int32_t transId = readVarint<int32_t>(c);
+-    readTrans_.push_back(transId);
+-    setTransform(transId);
++    const auto transId = readVarint<uint32_t>(c);
++    if (transId != ZLIB_TRANSFORM && transId != ZSTD_TRANSFORM) {
++      throw TApplicationException(
++          TApplicationException::MISSING_RESULT, "Unknown Header transform");
++    }
++    transforms.push_back(transId);
++    if (std::find(writeTransforms.begin(), writeTransforms.end(), transId) ==
++        writeTransforms.end()) {
++      writeTransforms.push_back(transId);
++    }
+   }
+ 
++  HeaderViews persistent;
++  uint64_t persistentBytes = 0;
++  for (const auto& entry : persistentReadHeaders) {
++    setHeaderView(
++        persistent,
++        persistentBytes,
++        entry.first,
++        entry.second,
++        readLimits_.maxPersistentHeaderBytes,
++        readLimits_.maxPersistentHeaders);
++  }
++  HeaderViews request;
++  uint64_t requestBytes = 0;
++  bool persistentUpdated = false;
++
+   // Info headers
+-  while (data.data() != c.data()) {
++  while (!c.isAtEnd()) {
+     uint32_t infoId = readVarint<int32_t>(c);
+ 
+     if (infoId == 0) {
+@@ -492,25 +586,43 @@ unique_ptr<IOBuf> THeader::readHeaderFormat(
+     }
+     switch (infoId) {
+       case infoIdType::KEYVALUE:
+-        readInfoHeaders(c, ensureReadHeaders());
++        readInfoHeaders(
++            c,
++            request,
++            requestBytes,
++            readLimits_.maxReadHeaderBytes,
++            readLimits_.maxReadHeaders);
+         break;
+       case infoIdType::PKEYVALUE:
+-        readInfoHeaders(c, persistentReadHeaders);
++        readInfoHeaders(
++            c,
++            persistent,
++            persistentBytes,
++            readLimits_.maxPersistentHeaderBytes,
++            readLimits_.maxPersistentHeaders);
++        persistentUpdated = true;
+         break;
+     }
+   }
+ 
+   // if persistent headers are not empty, merge together.
+-  if (!persistentReadHeaders.empty()) {
+-    ensureReadHeaders().insert(
+-        persistentReadHeaders.begin(), persistentReadHeaders.end());
++  for (const auto& entry : persistent) {
++    // Per-request headers retain precedence over persistent headers.
++    if (request.find(entry.first) == request.end()) {
++      setHeaderView(
++          request,
++          requestBytes,
++          entry.first,
++          entry.second,
++          readLimits_.maxReadHeaderBytes,
++          readLimits_.maxReadHeaders);
++    }
+   }
+ 
+   // Get just the data section using trim on a queue
+   unique_ptr<IOBufQueue> msg(new IOBufQueue);
+   msg->append(std::move(buf));
+   msg->trimStart(headerSize);
+-  msg->trimEnd(macSz);
+ 
+   buf = msg->move();
+   // msg->move() can return an empty pointer if all the data is
+@@ -520,42 +632,172 @@ unique_ptr<IOBuf> THeader::readHeaderFormat(
+   }
+ 
+   // Untransform data section
+-  buf = untransform(std::move(buf), readTrans_);
++  buf = untransform(std::move(buf), transforms, readLimits_);
+ 
+-  if (protoId_ == T_JSON_PROTOCOL && clientType_ != THRIFT_HTTP_SERVER_TYPE) {
++  if (protocol == T_JSON_PROTOCOL && clientType_ != THRIFT_HTTP_SERVER_TYPE) {
+     throw TApplicationException(
+         TApplicationException::UNSUPPORTED_CLIENT_TYPE,
+         "Client is trying to send JSON without HTTP");
+   }
+ 
++  // Both materializations must succeed before publishing any persistent state.
++  auto newReadHeaders = materializeHeaders(request);
++  auto newPersistent =
++      persistentUpdated ? materializeHeaders(persistent) : StringToStringMap{};
++  readHeaders_.emplace(std::move(newReadHeaders));
++  if (persistentUpdated) {
++    persistentReadHeaders.swap(newPersistent);
++  }
++  protoId_ = protocol;
++  readTrans_ = std::move(transforms);
++  writeTrans_ = std::move(writeTransforms);
++
+   return buf;
+ }
+ 
+-static unique_ptr<IOBuf> decompressCodec(
+-    const IOBuf& buf, folly::io::CodecType codec) {
+-  try {
+-    return folly::io::getCodec(codec)->uncompress(&buf);
+-  } catch (const std::exception& e) {
+-    throw TApplicationException(
+-        TApplicationException::MISSING_RESULT,
+-        folly::exceptionStr(e).toStdString());
++namespace {
++[[noreturn]] void invalidCompressedHeader(const char* message) {
++  throw TApplicationException(TApplicationException::MISSING_RESULT, message);
++}
++
++struct DecodeProgress {
++  size_t consumed;
++  size_t produced;
++  bool done;
++};
++
++template <typename Step>
++unique_ptr<IOBuf> decompressBounded(
++    const IOBuf& buf,
++    const THeader::ReadLimits& limits,
++    uint64_t& workRemaining,
++    Step&& step) {
++  const auto inputSize = buf.computeChainDataLength();
++  if (inputSize > workRemaining) {
++    headerLimitExceeded("Header decompression work budget exceeded");
++  }
++  // Charge all compressed input once per layer, in addition to actual output.
++  workRemaining -= inputSize;
++  uint64_t outputRemaining = limits.maxUncompressedBytes;
++  Cursor input(&buf);
++  IOBufQueue result;
++  std::array<uint8_t, 16384> scratch;
++  uint8_t probe;
++  while (true) {
++    auto bytes = input.peekBytes();
++    const auto capacity = std::min<uint64_t>(
++        scratch.size(), std::min(outputRemaining, workRemaining));
++    // At the exact limit, allow the codec to consume its trailer without a new
++    // heap allocation. One output byte in this stack probe proves overflow.
++    auto progress = step(
++        bytes, capacity ? scratch.data() : &probe, capacity ? capacity : 1);
++    if (progress.produced > capacity) {
++      headerLimitExceeded("Header decompression output/work budget exceeded");
++    }
++    outputRemaining -= progress.produced;
++    workRemaining -= progress.produced;
++    // Budget checked BEFORE allocating any output IOBuf. Codec frame content
++    // sizes never control an allocation, including unknown-length ZSTD frames.
++    if (progress.produced) {
++      result.append(IOBuf::copyBuffer(scratch.data(), progress.produced));
++    }
++    input.skip(progress.consumed);
++    if (progress.done) {
++      if (!input.isAtEnd()) {
++        invalidCompressedHeader("Trailing data after compressed Header frame");
++      }
++      auto output = result.move();
++      return output ? std::move(output) : IOBuf::create(0);
++    }
++    if (!progress.consumed && !progress.produced) {
++      invalidCompressedHeader("Truncated or invalid compressed Header frame");
++    }
++  }
++}
++
++unique_ptr<IOBuf> decompressCodec(
++    const IOBuf& buf,
++    uint16_t transform,
++    const THeader::ReadLimits& limits,
++    uint64_t& workRemaining) {
++  // Reject an exhausted input budget even before creating codec state.
++  if (buf.computeChainDataLength() > workRemaining) {
++    headerLimitExceeded("Header decompression work budget exceeded");
++  }
++  if (transform == THeader::ZLIB_TRANSFORM) {
++    z_stream stream{};
++    if (inflateInit(&stream) != Z_OK) {
++      invalidCompressedHeader("Cannot initialize Header zlib decoder");
++    }
++    auto cleanup = folly::makeGuard([&] { inflateEnd(&stream); });
++    return decompressBounded(
++        buf,
++        limits,
++        workRemaining,
++        [&](ByteRange input, uint8_t* output, size_t capacity) {
++          const auto inputSize =
++              std::min<size_t>(input.size(), std::numeric_limits<uInt>::max());
++          stream.next_in = const_cast<Bytef*>(input.data());
++          stream.avail_in = inputSize;
++          stream.next_out = output;
++          stream.avail_out = capacity;
++          const auto status = inflate(&stream, Z_NO_FLUSH);
++          if (status != Z_OK && status != Z_STREAM_END &&
++              status != Z_BUF_ERROR) {
++            invalidCompressedHeader("Invalid Header zlib data");
++          }
++          return DecodeProgress{
++              inputSize - stream.avail_in,
++              capacity - stream.avail_out,
++              status == Z_STREAM_END};
++        });
+   }
++  std::unique_ptr<ZSTD_DStream, decltype(&ZSTD_freeDStream)> stream(
++      ZSTD_createDStream(), &ZSTD_freeDStream);
++  if (!stream || ZSTD_isError(ZSTD_initDStream(stream.get())) ||
++      ZSTD_isError(ZSTD_DCtx_setParameter(
++          stream.get(), ZSTD_d_windowLogMax, limits.zstdWindowLogMax))) {
++    invalidCompressedHeader("Cannot initialize bounded Header ZSTD decoder");
++  }
++  return decompressBounded(
++      buf,
++      limits,
++      workRemaining,
++      [&](ByteRange input, uint8_t* output, size_t capacity) {
++        ZSTD_inBuffer in{input.data(), input.size(), 0};
++        ZSTD_outBuffer out{output, capacity, 0};
++        const auto status = ZSTD_decompressStream(stream.get(), &out, &in);
++        if (ZSTD_isError(status)) {
++          invalidCompressedHeader(ZSTD_getErrorName(status));
++        }
++        return DecodeProgress{in.pos, out.pos, status == 0};
++      });
+ }
++} // namespace
+ 
+ unique_ptr<IOBuf> THeader::untransform(
+     unique_ptr<IOBuf> buf, std::vector<uint16_t>& readTrans) {
++  return untransform(std::move(buf), readTrans, ReadLimits{});
++}
++
++unique_ptr<IOBuf> THeader::untransform(
++    unique_ptr<IOBuf> buf,
++    std::vector<uint16_t>& readTrans,
++    const ReadLimits& limits) {
++  limits.validate();
++  if (readTrans.size() > limits.maxTransforms) {
++    headerLimitExceeded("Too many incoming Header transforms");
++  }
++  uint64_t workRemaining = limits.maxDecompressionWorkBytes;
+   for (vector<uint16_t>::const_reverse_iterator it = readTrans.rbegin();
+        it != readTrans.rend();
+        ++it) {
+-    using folly::io::CodecType;
+     const uint16_t transId = *it;
+ 
+     switch (transId) {
+       case ZLIB_TRANSFORM:
+-        buf = decompressCodec(*buf, CodecType::ZLIB);
+-        break;
+       case ZSTD_TRANSFORM:
+-        buf = decompressCodec(*buf, CodecType::ZSTD);
++        buf = decompressCodec(*buf, transId, limits, workRemaining);
+         break;
+       default:
+         throw TApplicationException(
+@@ -564,6 +806,10 @@ unique_ptr<IOBuf> THeader::untransform(
+     }
+   }
+ 
++  if (buf->computeChainDataLength() > limits.maxUncompressedBytes) {
++    headerLimitExceeded("Header payload budget exceeded");
++  }
++
+   return buf;
+ }
+ 
+@@ -819,6 +1065,8 @@ unique_ptr<IOBuf> THeader::addHeader(
+   std::vector<uint16_t> writeTrans = writeTrans_;
+ 
+   if (clientType_ == THRIFT_HEADER_CLIENT_TYPE) {
++    // Validate before applying transforms or computing the output allocation.
++    getNumTransforms(writeTrans);
+     if (transform) {
+       buf = THeader::transform(std::move(buf), writeTrans);
+     }
+@@ -847,7 +1095,7 @@ unique_ptr<IOBuf> THeader::addHeader(
+   if (clientType_ == THRIFT_HEADER_CLIENT_TYPE) {
+     // header size will need to be updated at the end because of varints.
+     // Make it big enough here for max varint size, plus 4 for padding.
+-    int headerSize =
++    size_t headerSize =
+         (2 + getNumTransforms(writeTrans) * 2 /* transform data */) * 5 + 4;
+     // add approximate size of info headers
+     headerSize += getMaxWriteHeadersSize(persistentWriteHeaders);
+@@ -909,6 +1157,11 @@ unique_ptr<IOBuf> THeader::addHeader(
+     headerSize = (pkt - headerStart);
+     uint8_t padding = 4 - (headerSize % 4);
+     headerSize += padding;
++    if (headerSize / 4 > std::numeric_limits<uint16_t>::max()) {
++      throw TTransportException(
++          TTransportException::INVALID_FRAME_SIZE,
++          "Header metadata exceeds the 16-bit word count");
++    }
+ 
+     // Pad out pkt with 0x00
+     for (int i = 0; i < padding; i++) {
 diff --git a/thrift/lib/cpp/transport/THeader.h b/thrift/lib/cpp/transport/THeader.h
-index ca4f761ed9ef36be79d600c0c82f7021845c60be..d111a603c88d28424051020e65c5ca3f206472be 100644
+index ca4f761ed9ef36be79d600c0c82f7021845c60be..fc97185b0530003dc24d9d4f5cfb1d1b934d7c21 100644
 --- a/thrift/lib/cpp/transport/THeader.h
 +++ b/thrift/lib/cpp/transport/THeader.h
-@@ -299,7 +299,8 @@ class THeader final {
+@@ -18,6 +18,7 @@
+ #define THRIFT_TRANSPORT_THEADER_H_ 1
+ 
+ #include <functional>
++#include <limits>
+ #include <map>
+ #include <optional>
+ #include <string_view>
+@@ -29,6 +30,7 @@
+ #include <folly/portability/Unistd.h>
+ #include <thrift/lib/cpp/concurrency/Thread.h>
+ #include <thrift/lib/cpp/protocol/TProtocolTypes.h>
++#include <thrift/lib/cpp/transport/TTransportException.h>
+ #include <thrift/lib/thrift/gen-cpp2/RpcMetadata_types.h>
+ 
+ #include <bitset>
+@@ -145,6 +147,30 @@ class THeader final {
+ 
+   explicit THeader(int options = 0);
+ 
++  // Receive-side limits, copied into each connection/frame. Byte budgets count
++  // key/value bytes or decoded payload bytes, not allocator/object overhead.
++  struct ReadLimits {
++    uint64_t maxUncompressedBytes = 64ULL << 20;
++    // Sum of compressed input and produced output across all transform layers.
++    uint64_t maxDecompressionWorkBytes = 128ULL << 20;
++    uint16_t maxTransforms = 4;
++    // ZSTD decoder history window: 2^23 bytes, independent of output budget.
++    unsigned zstdWindowLogMax = 23;
++    uint32_t maxHeaderBytes = 256U << 10;
++    uint64_t maxPersistentHeaderBytes = 64ULL << 10;
++    size_t maxPersistentHeaders = 1024;
++    uint64_t maxReadHeaderBytes = 256ULL << 10;
++    size_t maxReadHeaders = 2048;
++
++    void validate() const;
++  };
++
++  void setReadLimits(const ReadLimits& limits) {
++    limits.validate();
++    readLimits_ = limits;
++  }
++  const ReadLimits& getReadLimits() const { return readLimits_; }
++
+   void setClientType(CLIENT_TYPE ct) { this->clientType_ = ct; }
+   // Force using specified client type when using legacy client types
+   // i.e. sniffing out client type is disabled.
+@@ -186,6 +212,10 @@ class THeader final {
+    */
+   static std::unique_ptr<folly::IOBuf> untransform(
+       std::unique_ptr<folly::IOBuf>, std::vector<uint16_t>& readTrans);
++  static std::unique_ptr<folly::IOBuf> untransform(
++      std::unique_ptr<folly::IOBuf>,
++      std::vector<uint16_t>& readTrans,
++      const ReadLimits& limits);
+ 
+   /**
+    * Transform the data based on our write transform flags
+@@ -206,6 +236,11 @@ class THeader final {
+   void copyMetadataFrom(const THeader& src);
+ 
+   static uint16_t getNumTransforms(const std::vector<uint16_t>& transforms) {
++    if (transforms.size() > std::numeric_limits<uint16_t>::max()) {
++      throw TTransportException(
++          TTransportException::INVALID_FRAME_SIZE,
++          "Too many Header transforms");
++    }
+     return folly::to_narrow(transforms.size());
+   }
+ 
+@@ -299,7 +334,8 @@ class THeader final {
    std::unique_ptr<folly::IOBuf> removeHeader(
        folly::IOBufQueue*,
        size_t& needed,
@@ -1430,6 +2884,14 @@ index ca4f761ed9ef36be79d600c0c82f7021845c60be..d111a603c88d28424051020e65c5ca3f
  
    void setDesiredCompressionConfig(CompressionConfig compressionConfig) {
      compressionConfig_ = compressionConfig;
+@@ -442,6 +478,7 @@ class THeader final {
+ 
+   std::vector<uint16_t> readTrans_;
+   std::vector<uint16_t> writeTrans_;
++  ReadLimits readLimits_;
+ 
+   // Map to use for headers
+   std::optional<StringToStringMap> readHeaders_;
 diff --git a/thrift/lib/cpp/transport/test/THeaderFrameLengthTest.cpp b/thrift/lib/cpp/transport/test/THeaderFrameLengthTest.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..e8846f7122959355b7c08e34dda86cc616a0ad1a
@@ -1734,6 +3196,560 @@ index 0000000000000000000000000000000000000000..e8846f7122959355b7c08e34dda86cc6
 +  EXPECT_THROW(h.removeHeader(&q, n, ph, fl), TTransportException);
 +  EXPECT_EQ(0u, fl);
 +}
+diff --git a/thrift/lib/cpp/transport/test/THeaderResourceLimitsTest.cpp b/thrift/lib/cpp/transport/test/THeaderResourceLimitsTest.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..f9d620fb9d58f70234f8d1de6e3b67eea12c292d
+--- /dev/null
++++ b/thrift/lib/cpp/transport/test/THeaderResourceLimitsTest.cpp
+@@ -0,0 +1,548 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <thrift/lib/cpp/transport/THeader.h>
++
++#include <zstd.h>
++#include <folly/io/IOBufQueue.h>
++#include <folly/portability/GTest.h>
++#include <thrift/lib/cpp/TApplicationException.h>
++
++namespace apache::thrift::transport {
++namespace {
++using folly::IOBuf;
++using Headers = THeader::StringToStringMap;
++using Limits = THeader::ReadLimits;
++using Pairs = std::vector<std::pair<std::string, std::string>>;
++
++void varint(std::string& out, uint32_t value) {
++  while (value >= 128) {
++    out.push_back((value & 127) | 128);
++    value >>= 7;
++  }
++  out.push_back(value);
++}
++
++void info(std::string& out, uint32_t type, const Pairs& pairs) {
++  if (pairs.empty()) {
++    return;
++  }
++  varint(out, type);
++  varint(out, pairs.size());
++  for (const auto& pair : pairs) {
++    varint(out, pair.first.size());
++    out += pair.first;
++    varint(out, pair.second.size());
++    out += pair.second;
++  }
++}
++
++std::unique_ptr<IOBuf> rawFrame(
++    std::string metadata, std::string payload = "x") {
++  metadata.resize((metadata.size() + 3) & ~size_t(3), '\0');
++  std::string frame(10, '\0');
++  frame[0] = 0x0f;
++  frame[1] = 0xff;
++  frame[8] = (metadata.size() / 4) >> 8;
++  frame[9] = metadata.size() / 4;
++  frame += metadata;
++  frame += payload;
++  return IOBuf::copyBuffer(frame);
++}
++
++std::unique_ptr<IOBuf> frame(
++    const Pairs& persistent = {},
++    const Pairs& request = {},
++    const std::vector<uint16_t>& transforms = {},
++    std::string payload = "x") {
++  std::string metadata;
++  varint(metadata, 0); // binary protocol
++  varint(metadata, transforms.size());
++  for (auto transform : transforms) {
++    varint(metadata, transform);
++  }
++  info(metadata, 2, persistent);
++  info(metadata, 1, request);
++  return rawFrame(metadata, std::move(payload));
++}
++
++std::unique_ptr<IOBuf> compressed(std::string data, uint16_t transform) {
++  std::vector<uint16_t> transforms{transform};
++  return THeader::transform(IOBuf::copyBuffer(data), transforms);
++}
++
++std::unique_ptr<IOBuf> zstdUnknownSize(const std::string& data) {
++  std::unique_ptr<ZSTD_CCtx, decltype(&ZSTD_freeCCtx)> ctx(
++      ZSTD_createCCtx(), &ZSTD_freeCCtx);
++  if (!ctx ||
++      ZSTD_isError(
++          ZSTD_CCtx_setParameter(ctx.get(), ZSTD_c_contentSizeFlag, 0))) {
++    throw std::runtime_error("Cannot initialize test compressor");
++  }
++  std::string output(ZSTD_compressBound(data.size()), '\0');
++  const auto size = ZSTD_compress2(
++      ctx.get(), output.data(), output.size(), data.data(), data.size());
++  if (ZSTD_isError(size)) {
++    throw std::runtime_error(ZSTD_getErrorName(size));
++  }
++  output.resize(size);
++  return IOBuf::copyBuffer(output);
++}
++
++class HeaderDecompressionLimitsTest : public testing::TestWithParam<uint16_t> {
++};
++
++TEST_P(HeaderDecompressionLimitsTest, OutputBoundary) {
++  Limits limits;
++  limits.maxUncompressedBytes = 1024;
++  std::vector<uint16_t> transforms{GetParam()};
++  for (size_t size : {0, 1023, 1024, 1025}) {
++    SCOPED_TRACE(size);
++    auto input = compressed(std::string(size, 'a'), GetParam());
++    if (size <= 1024) {
++      auto output = THeader::untransform(std::move(input), transforms, limits);
++      EXPECT_EQ(output->computeChainDataLength(), size);
++      EXPECT_EQ(output->to<std::string>(), std::string(size, 'a'));
++    } else {
++      EXPECT_THROW(
++          THeader::untransform(std::move(input), transforms, limits),
++          TTransportException);
++    }
++  }
++}
++
++TEST_P(HeaderDecompressionLimitsTest, ChainedInputAndOutput) {
++  std::string data(50000, 'x');
++  for (size_t i = 0; i < data.size(); ++i) {
++    data[i] = static_cast<char>((i * 37) % 251);
++  }
++  auto bytes = compressed(data, GetParam())->to<std::string>();
++  folly::IOBufQueue chain;
++  chain.append(IOBuf::create(0));
++  for (auto byte : bytes) {
++    chain.append(IOBuf::copyBuffer(&byte, 1));
++    chain.append(IOBuf::create(0));
++  }
++  Limits limits;
++  limits.maxUncompressedBytes = data.size();
++  std::vector<uint16_t> transforms{GetParam()};
++  auto output = THeader::untransform(chain.move(), transforms, limits);
++  EXPECT_EQ(output->to<std::string>(), data);
++}
++
++TEST_P(HeaderDecompressionLimitsTest, TruncatedAndTrailingDataRejected) {
++  auto bytes =
++      compressed(std::string(2048, 'a'), GetParam())->to<std::string>();
++  std::vector<uint16_t> transforms{GetParam()};
++  for (size_t size : {size_t(0), size_t(1), bytes.size() - 1}) {
++    EXPECT_THROW(
++        THeader::untransform(IOBuf::copyBuffer(bytes.data(), size), transforms),
++        TApplicationException);
++  }
++  bytes.push_back('x');
++  EXPECT_THROW(
++      THeader::untransform(IOBuf::copyBuffer(bytes), transforms),
++      TApplicationException);
++}
++
++TEST_P(HeaderDecompressionLimitsTest, RepeatedOversizedRequests) {
++  auto bytes = compressed(std::string(1 << 20, 'a'), GetParam());
++  std::vector<uint16_t> transforms{GetParam()};
++  Limits limits;
++  limits.maxUncompressedBytes = 128;
++  for (size_t i = 0; i < 100; ++i) {
++    EXPECT_THROW(
++        THeader::untransform(bytes->clone(), transforms, limits),
++        TTransportException);
++  }
++  EXPECT_EQ(
++      THeader::untransform(compressed("ok", GetParam()), transforms, limits)
++          ->to<std::string>(),
++      "ok");
++}
++
++TEST_P(HeaderDecompressionLimitsTest, WorkCountsInputAndOutput) {
++  auto input = compressed(std::string(1024, 'x'), GetParam());
++  const auto exactWork = input->computeChainDataLength() + 1024;
++  std::vector<uint16_t> transforms{GetParam()};
++  Limits limits;
++  limits.maxDecompressionWorkBytes = exactWork;
++  EXPECT_EQ(
++      THeader::untransform(input->clone(), transforms, limits)
++          ->computeChainDataLength(),
++      1024);
++  --limits.maxDecompressionWorkBytes;
++  EXPECT_THROW(
++      THeader::untransform(input->clone(), transforms, limits),
++      TTransportException);
++  limits.maxDecompressionWorkBytes = input->computeChainDataLength() - 1;
++  EXPECT_THROW(
++      THeader::untransform(input->clone(), transforms, limits),
++      TTransportException);
++}
++
++INSTANTIATE_TEST_SUITE_P(
++    Codecs,
++    HeaderDecompressionLimitsTest,
++    testing::Values(THeader::ZLIB_TRANSFORM, THeader::ZSTD_TRANSFORM));
++
++TEST(THeaderResourceLimitsTest, UnknownZstdLengthBoundary) {
++  Limits limits;
++  limits.maxUncompressedBytes = 1024;
++  std::vector<uint16_t> transforms{THeader::ZSTD_TRANSFORM};
++  for (size_t size : {1023, 1024, 1025}) {
++    auto input = zstdUnknownSize(std::string(size, 'x'));
++    EXPECT_EQ(
++        ZSTD_getFrameContentSize(input->data(), input->length()),
++        ZSTD_CONTENTSIZE_UNKNOWN);
++    if (size <= 1024) {
++      EXPECT_EQ(
++          THeader::untransform(std::move(input), transforms, limits)
++              ->computeChainDataLength(),
++          size);
++    } else {
++      EXPECT_THROW(
++          THeader::untransform(std::move(input), transforms, limits),
++          TTransportException);
++    }
++  }
++}
++
++TEST(THeaderResourceLimitsTest, ZstdWindowLimitIndependentOfOutputLimit) {
++  auto input = zstdUnknownSize(std::string(1 << 20, 'x'));
++  Limits limits;
++  limits.zstdWindowLogMax = 10;
++  std::vector<uint16_t> transforms{THeader::ZSTD_TRANSFORM};
++  EXPECT_THROW(
++      THeader::untransform(input->clone(), transforms, limits),
++      TApplicationException);
++  limits.zstdWindowLogMax = 23;
++  EXPECT_EQ(
++      THeader::untransform(input->clone(), transforms, limits)
++          ->computeChainDataLength(),
++      1 << 20);
++}
++
++TEST(THeaderResourceLimitsTest, LayerCountAndCumulativeWork) {
++  auto inner = compressed(std::string(1024, 'x'), THeader::ZLIB_TRANSFORM);
++  auto outer = compressed(inner->to<std::string>(), THeader::ZSTD_TRANSFORM);
++  std::vector<uint16_t> transforms{
++      THeader::ZLIB_TRANSFORM, THeader::ZSTD_TRANSFORM};
++  Limits limits;
++  limits.maxTransforms = 1;
++  EXPECT_THROW(
++      THeader::untransform(outer->clone(), transforms, limits),
++      TTransportException);
++  limits.maxTransforms = 2;
++  limits.maxDecompressionWorkBytes = outer->computeChainDataLength() +
++      2 * inner->computeChainDataLength() + 1024;
++  EXPECT_EQ(
++      THeader::untransform(outer->clone(), transforms, limits)
++          ->computeChainDataLength(),
++      1024);
++  --limits.maxDecompressionWorkBytes;
++  EXPECT_THROW(
++      THeader::untransform(outer->clone(), transforms, limits),
++      TTransportException);
++}
++
++TEST(THeaderResourceLimitsTest, IntermediateOutputAlsoLimited) {
++  // Compressing a one-byte payload makes an intermediate stream larger than
++  // the final result. A final-output-only limit would incorrectly allow this.
++  auto inner = compressed("x", THeader::ZLIB_TRANSFORM);
++  auto outer = compressed(inner->to<std::string>(), THeader::ZSTD_TRANSFORM);
++  std::vector<uint16_t> transforms{
++      THeader::ZLIB_TRANSFORM, THeader::ZSTD_TRANSFORM};
++  Limits limits;
++  limits.maxUncompressedBytes = 1;
++  EXPECT_THROW(
++      THeader::untransform(std::move(outer), transforms, limits),
++      TTransportException);
++}
++
++TEST(THeaderResourceLimitsTest, PlainPayloadAndInvalidConfiguration) {
++  Limits limits;
++  limits.maxUncompressedBytes = 1;
++  std::vector<uint16_t> transforms;
++  EXPECT_THROW(
++      THeader::untransform(IOBuf::copyBuffer("xx"), transforms, limits),
++      TTransportException);
++  THeader header;
++  limits.maxUncompressedBytes = 0;
++  EXPECT_THROW(header.setReadLimits(limits), std::invalid_argument);
++  limits = Limits{};
++  limits.zstdWindowLogMax = 0;
++  EXPECT_THROW(header.setReadLimits(limits), std::invalid_argument);
++}
++
++TEST(THeaderResourceLimitsTest, PersistentByteBoundaryAndAtomicFailure) {
++  for (size_t bytes : {7, 8, 9}) {
++    THeader header;
++    Limits limits;
++    limits.maxPersistentHeaderBytes = 8;
++    header.setReadLimits(limits);
++    Headers persistent;
++    auto input = frame({{"k", std::string(bytes - 1, 'v')}});
++    if (bytes <= 8) {
++      EXPECT_NO_THROW(header.readHeaderFormat(std::move(input), persistent));
++      EXPECT_EQ(persistent.at("k").size(), bytes - 1);
++    } else {
++      EXPECT_THROW(
++          header.readHeaderFormat(std::move(input), persistent),
++          TTransportException);
++      EXPECT_TRUE(persistent.empty());
++    }
++  }
++}
++
++TEST(THeaderResourceLimitsTest, RepeatedNewKeysHitEntryLimit) {
++  THeader header;
++  Limits limits;
++  limits.maxPersistentHeaders = 2;
++  header.setReadLimits(limits);
++  Headers persistent;
++  header.readHeaderFormat(frame({{"a", "1"}}), persistent);
++  header.readHeaderFormat(frame({{"b", "2"}}), persistent);
++  const auto before = persistent;
++  for (size_t i = 0; i < 100; ++i) {
++    EXPECT_THROW(
++        header.readHeaderFormat(frame({{std::to_string(i), "3"}}), persistent),
++        TTransportException);
++    EXPECT_EQ(persistent, before);
++  }
++}
++
++TEST(THeaderResourceLimitsTest, ReplacementAccountsForOldValue) {
++  THeader header;
++  Limits limits;
++  limits.maxPersistentHeaders = 1;
++  limits.maxPersistentHeaderBytes = 8;
++  header.setReadLimits(limits);
++  Headers persistent;
++  for (const auto& value : {"1234567", "1", "1234567"}) {
++    EXPECT_NO_THROW(header.readHeaderFormat(frame({{"k", value}}), persistent));
++    EXPECT_EQ(persistent.size(), 1);
++    EXPECT_EQ(persistent.at("k"), value);
++  }
++  EXPECT_THROW(
++      header.readHeaderFormat(frame({{"k", "12345678"}}), persistent),
++      TTransportException);
++  EXPECT_EQ(persistent.at("k"), "1234567");
++}
++
++TEST(THeaderResourceLimitsTest, PersistentBytesAccumulateAcrossFrames) {
++  THeader header;
++  Limits limits;
++  limits.maxPersistentHeaderBytes = 6;
++  header.setReadLimits(limits);
++  Headers persistent;
++  header.readHeaderFormat(frame({{"a", "11"}}), persistent);
++  header.readHeaderFormat(frame({{"b", "22"}}), persistent);
++  const auto before = persistent;
++  EXPECT_THROW(
++      header.readHeaderFormat(frame({{"c", "3"}}), persistent),
++      TTransportException);
++  EXPECT_EQ(persistent, before);
++}
++
++TEST(THeaderResourceLimitsTest, RequestHeaderByteBoundary) {
++  for (size_t bytes : {3, 4, 5}) {
++    THeader header;
++    Limits limits;
++    limits.maxReadHeaderBytes = 4;
++    header.setReadLimits(limits);
++    Headers persistent;
++    auto input = frame({}, {{"k", std::string(bytes - 1, 'v')}});
++    if (bytes <= 4) {
++      EXPECT_NO_THROW(header.readHeaderFormat(std::move(input), persistent));
++      EXPECT_EQ(header.getHeaders().at("k").size(), bytes - 1);
++    } else {
++      EXPECT_THROW(
++          header.readHeaderFormat(std::move(input), persistent),
++          TTransportException);
++      EXPECT_TRUE(header.getHeaders().empty());
++    }
++  }
++}
++
++TEST(THeaderResourceLimitsTest, ZeroHeaderQuotasAndDuplicateKeys) {
++  THeader header;
++  Limits limits;
++  limits.maxPersistentHeaders = 0;
++  limits.maxReadHeaders = 0;
++  header.setReadLimits(limits);
++  Headers persistent;
++  EXPECT_NO_THROW(header.readHeaderFormat(frame(), persistent));
++  EXPECT_THROW(
++      header.readHeaderFormat(frame({{"", ""}}), persistent),
++      TTransportException);
++  EXPECT_THROW(
++      header.readHeaderFormat(frame({}, {{"", ""}}), persistent),
++      TTransportException);
++  limits.maxPersistentHeaders = 1;
++  limits.maxReadHeaders = 1;
++  header.setReadLimits(limits);
++  header.readHeaderFormat(frame({{"k", "old"}, {"k", "new"}}), persistent);
++  EXPECT_EQ(persistent, (Headers{{"k", "new"}}));
++}
++
++TEST(THeaderResourceLimitsTest, FailedFrameDoesNotPartiallyReplaceState) {
++  THeader header;
++  Limits limits;
++  limits.maxPersistentHeaders = 2;
++  header.setReadLimits(limits);
++  Headers persistent{{"old", "original"}};
++  const auto before = persistent;
++  EXPECT_THROW(
++      header.readHeaderFormat(
++          frame({{"old", "replaced"}, {"new", "1"}, {"overflow", "2"}}),
++          persistent),
++      TTransportException);
++  EXPECT_EQ(persistent, before);
++  EXPECT_TRUE(header.getHeaders().empty());
++}
++
++TEST(THeaderResourceLimitsTest, RequestOverridesPersistentWithoutDeletingIt) {
++  THeader header;
++  Headers persistent;
++  header.readHeaderFormat(frame({{"key", "persistent"}}), persistent);
++  header.readHeaderFormat(frame({}, {{"key", "request"}}), persistent);
++  EXPECT_EQ(header.getHeaders().at("key"), "request");
++  EXPECT_EQ(persistent.at("key"), "persistent");
++  header.readHeaderFormat(frame(), persistent);
++  EXPECT_EQ(header.getHeaders().at("key"), "persistent");
++}
++
++TEST(THeaderResourceLimitsTest, MergedHeadersHaveByteAndEntryBudgets) {
++  for (bool bytes : {false, true}) {
++    THeader header;
++    Limits limits;
++    limits.maxReadHeaders = bytes ? 10 : 1;
++    limits.maxReadHeaderBytes = bytes ? 3 : 100;
++    header.setReadLimits(limits);
++    Headers persistent;
++    header.readHeaderFormat(frame({{"a", "1"}}), persistent);
++    const auto before = persistent;
++    EXPECT_THROW(
++        header.readHeaderFormat(frame({}, {{"b", "2"}}), persistent),
++        TTransportException);
++    EXPECT_EQ(persistent, before);
++    // Duplicate key occupies one merged entry, not two.
++    EXPECT_NO_THROW(
++        header.readHeaderFormat(frame({}, {{"a", "2"}}), persistent));
++  }
++}
++
++TEST(THeaderResourceLimitsTest, DeclaredHeaderBoundaryCannotReadPayload) {
++  THeader header;
++  Headers persistent{{"old", "value"}};
++  const auto before = persistent;
++  // Metadata ends after the key's length; payload contains enough bytes to
++  // satisfy the old unbounded cursor, but is not part of the header region.
++  std::string metadata;
++  varint(metadata, 0);
++  varint(metadata, 0);
++  varint(metadata, 2);
++  varint(metadata, 1);
++  varint(metadata, 100);
++  EXPECT_THROW(
++      header.readHeaderFormat(
++          rawFrame(metadata, std::string(200, 'x')), persistent),
++      TTransportException);
++  EXPECT_EQ(persistent, before);
++}
++
++TEST(THeaderResourceLimitsTest, TruncatedVarintAndHugeCountDoNotCommit) {
++  THeader header;
++  Headers persistent{{"old", "value"}};
++  const auto before = persistent;
++  // Exactly four metadata bytes: the next varint may not consume payload.
++  const std::string partial{"\0\0\2\x80", 4};
++  EXPECT_THROW(
++      header.readHeaderFormat(rawFrame(partial), persistent), std::exception);
++  std::string huge{"\0\0\2", 3};
++  varint(huge, 0xffffffff);
++  EXPECT_THROW(
++      header.readHeaderFormat(rawFrame(huge), persistent), TTransportException);
++  EXPECT_EQ(persistent, before);
++}
++
++TEST(
++    THeaderResourceLimitsTest,
++    FailedDecompressionDoesNotCommitPersistentState) {
++  THeader header;
++  Headers persistent{{"old", "value"}};
++  const auto before = persistent;
++  EXPECT_THROW(
++      header.readHeaderFormat(
++          frame({{"new", "value"}}, {}, {THeader::ZLIB_TRANSFORM}, "invalid"),
++          persistent),
++      TApplicationException);
++  EXPECT_EQ(persistent, before);
++  Limits limits;
++  limits.maxUncompressedBytes = 16;
++  header.setReadLimits(limits);
++  auto payload = compressed(std::string(1024, 'x'), THeader::ZLIB_TRANSFORM);
++  EXPECT_THROW(
++      header.readHeaderFormat(
++          frame(
++              {{"new", "value"}},
++              {},
++              {THeader::ZLIB_TRANSFORM},
++              payload->to<std::string>()),
++          persistent),
++      TTransportException);
++  EXPECT_EQ(persistent, before);
++}
++
++TEST(THeaderResourceLimitsTest, MetadataAndTransformCountAreCheckedFirst) {
++  THeader header;
++  Limits limits;
++  limits.maxHeaderBytes = 4;
++  header.setReadLimits(limits);
++  Headers persistent;
++  EXPECT_THROW(
++      header.readHeaderFormat(frame({{"long-key", "value"}}), persistent),
++      TTransportException);
++  limits = Limits{};
++  limits.maxTransforms = 1;
++  header.setReadLimits(limits);
++  // Only the count is supplied: the quota must reject before reading IDs.
++  const std::string metadata{"\0\2", 2};
++  EXPECT_THROW(
++      header.readHeaderFormat(rawFrame(metadata), persistent),
++      TTransportException);
++  EXPECT_TRUE(persistent.empty());
++}
++
++TEST(THeaderResourceLimitsTest, FragmentedMetadataPreservesState) {
++  auto bytes =
++      frame({{"a", "persistent"}}, {{"a", "request"}})->to<std::string>();
++  folly::IOBufQueue queue;
++  for (auto byte : bytes) {
++    queue.append(IOBuf::copyBuffer(&byte, 1));
++  }
++  THeader header;
++  Headers persistent;
++  EXPECT_EQ(
++      header.readHeaderFormat(queue.move(), persistent)->to<std::string>(),
++      "x");
++  EXPECT_EQ(persistent.at("a"), "persistent");
++  EXPECT_EQ(header.getHeaders().at("a"), "request");
++}
++
++} // namespace
++} // namespace apache::thrift::transport
 diff --git a/thrift/lib/cpp/transport/test/THeaderTest.cpp b/thrift/lib/cpp/transport/test/THeaderTest.cpp
 index 4dbd593ac67d788e76985e9de9733019c26df463..e667a74b7a89b75f73bb4323340236ec707f0b65 100644
 --- a/thrift/lib/cpp/transport/test/THeaderTest.cpp
@@ -1783,7 +3799,7 @@ index 4dbd593ac67d788e76985e9de9733019c26df463..e667a74b7a89b75f73bb4323340236ec
    } catch (TTransportException& e) {
      ASSERT_EQ(e.what(), expected);
 diff --git a/thrift/lib/cpp2/CMakeLists.txt b/thrift/lib/cpp2/CMakeLists.txt
-index 71b60187471b8b2af34d1be06d9314ba7cff1523..784b1697578cbed06b3fa7b5d1fc26d30d875c35 100644
+index 71b60187471b8b2af34d1be06d9314ba7cff1523..d93123361d5cd0c76630e2aa5e96a8788661993a 100644
 --- a/thrift/lib/cpp2/CMakeLists.txt
 +++ b/thrift/lib/cpp2/CMakeLists.txt
 @@ -87,6 +87,7 @@ add_library(
@@ -1829,7 +3845,7 @@ index 71b60187471b8b2af34d1be06d9314ba7cff1523..784b1697578cbed06b3fa7b5d1fc26d3
 +    PROPERTIES
 +      COMPILE_OPTIONS       "${THRIFT_ARM_SVE2_FLAGS}"
 +      COMPILE_DEFINITIONS   "THRIFT_HAS_ARM_SVE2"
-+
++      
 +  )
 +endif()
 +
@@ -1894,7 +3910,7 @@ index 58a6bcb6c098a020727759bf6b50f8f793ca2e85..bfe54f8e9da2803d28c49ec4e8995a45
  
      std::unique_ptr<folly::IOBuf> addFrame(
 diff --git a/thrift/lib/cpp2/async/FramingHandler.cpp b/thrift/lib/cpp2/async/FramingHandler.cpp
-index af3c43d544475baba29d53af5d0198b925b9c994..a870ec2cb6e3d1200377a779e8112decdedee65b 100644
+index af3c43d544475baba29d53af5d0198b925b9c994..99c2c0d3da7e639dee06c5ba5b6ab87060697c74 100644
 --- a/thrift/lib/cpp2/async/FramingHandler.cpp
 +++ b/thrift/lib/cpp2/async/FramingHandler.cpp
 @@ -33,9 +33,10 @@ void FramingHandler::read(Context* ctx, folly::IOBufQueue& q) {
@@ -1909,7 +3925,7 @@ index af3c43d544475baba29d53af5d0198b925b9c994..a870ec2cb6e3d1200377a779e8112dec
      });
  
      if (ex) {
-@@ -45,11 +46,24 @@ void FramingHandler::read(Context* ctx, folly::IOBufQueue& q) {
+@@ -45,11 +46,37 @@ void FramingHandler::read(Context* ctx, folly::IOBufQueue& q) {
        return;
      }
  
@@ -1918,7 +3934,12 @@ index af3c43d544475baba29d53af5d0198b925b9c994..a870ec2cb6e3d1200377a779e8112dec
 +      if (strict_) {
 +        readSize = readBufferSize_;
 +      } else {
-+        readSize = std::clamp(avgRequestSize_ * kReadBufferMultiplier, size_t{2048}, size_t{524288});
++        // Clamp before multiplying so large frame lengths cannot wrap.
++        readSize = std::clamp(
++                       avgRequestSize_,
++                       size_t{2048} / kReadBufferMultiplier,
++                       size_t{524288} / kReadBufferMultiplier) *
++            kReadBufferMultiplier;
 +      }
 +      size_t remainLen = std::max(remaining, q.tailroom());
 +      ctx->setReadBufferSettings(readSize, remainLen > 0 ? remainLen : readSize);
@@ -1930,8 +3951,16 @@ index af3c43d544475baba29d53af5d0198b925b9c994..a870ec2cb6e3d1200377a779e8112dec
 +      refreshReadBuffer();
        return;
      } else {
-+      avgRequestSize_ = (avgRequestSize_ == 0) ? frameLength :
-+          (avgRequestSize_ * (kAvgWindowSamples - 1) + frameLength) / kAvgWindowSamples;
++      if (avgRequestSize_ == 0) {
++        avgRequestSize_ = frameLength;
++      } else if (frameLength >= avgRequestSize_) {
++        avgRequestSize_ += (frameLength - avgRequestSize_) / kAvgWindowSamples;
++      } else {
++        const size_t delta = avgRequestSize_ - frameLength;
++        // Preserve floor((9 * average + frameLength) / 10) without overflow.
++        avgRequestSize_ -=
++            delta / kAvgWindowSamples + (delta % kAvgWindowSamples != 0);
++      }
 +      refreshReadBuffer();
        ctx->fireRead(std::make_pair(std::move(unframed), std::move(header)));
      }
@@ -1974,10 +4003,28 @@ index 5184c3103fb922791928e4dc0aac8e06bbe25460..bc38daaa2c48dfc93d5a7d6dce614a08
  
  } // namespace thrift
 diff --git a/thrift/lib/cpp2/async/HeaderClientChannel.cpp b/thrift/lib/cpp2/async/HeaderClientChannel.cpp
-index cab380fbac8b7abe2cbbf9c532d9fc29374c8309..da1ec8acb40784613b47772b114095ce25a9f8ea 100644
+index cab380fbac8b7abe2cbbf9c532d9fc29374c8309..2fdd7719a24579122d7714c603498f3be7717607 100644
 --- a/thrift/lib/cpp2/async/HeaderClientChannel.cpp
 +++ b/thrift/lib/cpp2/async/HeaderClientChannel.cpp
-@@ -340,21 +340,22 @@ HeaderClientChannel::ClientFramingHandler::addFrame(
+@@ -285,6 +285,7 @@ void HeaderClientChannel::sendRequestResponse(
+     SerializedRequest&& serializedRequest,
+     std::shared_ptr<THeader> header,
+     RequestClientCallback::Ptr cb) {
++  CHECK(cb) << "Request-response callback must not be null";
+   preprocessHeader(header.get());
+ 
+   auto buf = LegacySerializedRequest(
+@@ -293,9 +294,6 @@ void HeaderClientChannel::sendRequestResponse(
+                  std::move(serializedRequest))
+                  .buffer;
+ 
+-  // cb is not allowed to be null.
+-  DCHECK(cb);
+-
+   DestructorGuard dg(this);
+ 
+   // Oneway requests use a special sequence id.
+@@ -340,21 +338,22 @@ HeaderClientChannel::ClientFramingHandler::addFrame(
    return header->addHeader(std::move(buf), persistentWriteHeaders);
  }
  
@@ -2005,6 +4052,14 @@ index cab380fbac8b7abe2cbbf9c532d9fc29374c8309..da1ec8acb40784613b47772b114095ce
  }
  
  // Interface from MessageChannel::RecvCallback
+@@ -514,6 +513,7 @@ void HeaderClientChannel::RocketUpgradeChannel::sendRequestResponse(
+     SerializedRequest&& serializedRequest,
+     std::shared_ptr<apache::thrift::transport::THeader> header,
+     RequestClientCallback::Ptr cb) {
++  CHECK(cb) << "Request-response callback must not be null";
+   preprocessHeader(header.get());
+ 
+   initUpgradeIfNeeded(rpcOptions);
 diff --git a/thrift/lib/cpp2/async/HeaderClientChannel.h b/thrift/lib/cpp2/async/HeaderClientChannel.h
 index 863d82799f45a9df2f9e1cf243b14b2ce624f701..1e2202aa910d867de1687c596dd390a9307aa9ce 100644
 --- a/thrift/lib/cpp2/async/HeaderClientChannel.h
@@ -2020,10 +4075,10 @@ index 863d82799f45a9df2f9e1cf243b14b2ce624f701..1e2202aa910d867de1687c596dd390a9
  
      std::unique_ptr<folly::IOBuf> addFrame(
 diff --git a/thrift/lib/cpp2/async/HeaderServerChannel.cpp b/thrift/lib/cpp2/async/HeaderServerChannel.cpp
-index ab617fe3d8fe4d490ed66e799584e08e188b12bb..13d2f3275e4b0baa2c4d39bc91ac39ce4555eb4a 100644
+index ab617fe3d8fe4d490ed66e799584e08e188b12bb..045b93a7dcbb5fbc277a0b9bebc6130b28f95a34 100644
 --- a/thrift/lib/cpp2/async/HeaderServerChannel.cpp
 +++ b/thrift/lib/cpp2/async/HeaderServerChannel.cpp
-@@ -76,20 +76,21 @@ unique_ptr<IOBuf> HeaderServerChannel::ServerFramingHandler::addFrame(
+@@ -76,20 +76,26 @@ unique_ptr<IOBuf> HeaderServerChannel::ServerFramingHandler::addFrame(
        false /* Data already transformed in AsyncProcessor.h */);
  }
  
@@ -2031,6 +4086,7 @@ index ab617fe3d8fe4d490ed66e799584e08e188b12bb..13d2f3275e4b0baa2c4d39bc91ac39ce
 +std::tuple<unique_ptr<IOBuf>, size_t, unique_ptr<THeader>, size_t>
  HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
    std::unique_ptr<THeader> header(new THeader(THeader::ALLOW_BIG_FRAMES));
++  header->setReadLimits(channel_.headerReadLimits_);
    // removeHeader will set seqid in header.
    // For older clients with seqid in the protocol, header
    // will dig in to the protocol to get the seqid correctly.
@@ -2042,13 +4098,17 @@ index ab617fe3d8fe4d490ed66e799584e08e188b12bb..13d2f3275e4b0baa2c4d39bc91ac39ce
    std::unique_ptr<folly::IOBuf> buf;
    size_t remaining = 0;
 +  size_t frameLength = 0;
++  // THeader stages parsing/decompression internally. Keep the connection state
++  // unchanged until the channel's additional payload validation also succeeds.
++  auto persistentReadHeaders = channel_.persistentReadHeaders_;
    try {
 -    buf = header->removeHeader(q, remaining, channel_.persistentReadHeaders_);
-+    buf = header->removeHeader(q, remaining, channel_.persistentReadHeaders_, frameLength);
++    buf =
++        header->removeHeader(q, remaining, persistentReadHeaders, frameLength);
    } catch (const std::exception& e) {
      LOG(ERROR) << "Received invalid request from client: "
                 << folly::exceptionStr(e) << " "
-@@ -97,7 +98,7 @@ HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
+@@ -97,7 +103,7 @@ HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
      throw;
    }
    if (!buf) {
@@ -2057,20 +4117,37 @@ index ab617fe3d8fe4d490ed66e799584e08e188b12bb..13d2f3275e4b0baa2c4d39bc91ac39ce
    }
  
    CLIENT_TYPE ct = header->getClientType();
-@@ -143,7 +144,7 @@ HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
+@@ -143,7 +149,8 @@ HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
                 << getTHeaderPayloadString(buf.get());
    }
  
 -  return make_tuple(std::move(buf), 0, std::move(header));
++  channel_.persistentReadHeaders_.swap(persistentReadHeaders);
 +  return make_tuple(std::move(buf), 0, std::move(header), frameLength);
  }
  
  std::string HeaderServerChannel::getTHeaderPayloadString(IOBuf* buf) {
 diff --git a/thrift/lib/cpp2/async/HeaderServerChannel.h b/thrift/lib/cpp2/async/HeaderServerChannel.h
-index e0108b1a3f41a8fd597038a5bc32cee8b68cb9d6..190fc139ecdf9bd5861a026d57273d8e6e38874f 100644
+index e0108b1a3f41a8fd597038a5bc32cee8b68cb9d6..2a005bf4471bec68885a166a92a48ff37ceeb557 100644
 --- a/thrift/lib/cpp2/async/HeaderServerChannel.h
 +++ b/thrift/lib/cpp2/async/HeaderServerChannel.h
-@@ -197,7 +197,8 @@ class HeaderServerChannel : public ServerChannel,
+@@ -73,6 +73,15 @@ class HeaderServerChannel : public ServerChannel,
+   // Server interface from ResponseChannel
+   void setCallback(ResponseChannel::Callback* callback) override;
+ 
++  // Configure before receiving data (on the channel's EventBase thread).
++  void setHeaderReadLimits(const transport::THeader::ReadLimits& limits) {
++    limits.validate();
++    headerReadLimits_ = limits;
++  }
++  const transport::THeader::ReadLimits& getHeaderReadLimits() const {
++    return headerReadLimits_;
++  }
++
+   virtual void sendMessage(
+       Cpp2Channel::SendCallback* callback,
+       std::unique_ptr<folly::IOBuf> buf,
+@@ -197,7 +206,8 @@ class HeaderServerChannel : public ServerChannel,
      std::tuple<
          std::unique_ptr<folly::IOBuf>,
          size_t,
@@ -2080,6 +4157,14 @@ index e0108b1a3f41a8fd597038a5bc32cee8b68cb9d6..190fc139ecdf9bd5861a026d57273d8e
      removeFrame(folly::IOBufQueue* q) override;
  
      std::unique_ptr<folly::IOBuf> addFrame(
+@@ -236,6 +246,7 @@ class HeaderServerChannel : public ServerChannel,
+   uint32_t sampleRate_;
+ 
+   transport::THeader::StringToStringMap persistentReadHeaders_;
++  transport::THeader::ReadLimits headerReadLimits_;
+ 
+   std::shared_ptr<Cpp2Channel> cpp2Channel_;
+ };
 diff --git a/thrift/lib/cpp2/async/tests/FramingHandlerTest.cpp b/thrift/lib/cpp2/async/tests/FramingHandlerTest.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..79f604831f49350d07093b0d37b13459c2fd3142
@@ -2537,7 +4622,7 @@ index 0000000000000000000000000000000000000000..79f604831f49350d07093b0d37b13459
 +  return RUN_ALL_TESTS();
 +}
 diff --git a/thrift/lib/cpp2/op/detail/Encode.h b/thrift/lib/cpp2/op/detail/Encode.h
-index 9535af84bfeda44aace6868154236419e68657b6..ca416280c7d75f9abf1366869ffe2417c18b9430 100644
+index 9535af84bfeda44aace6868154236419e68657b6..be49f94c2c9652b3d7cf734510470f42bdd404e4 100644
 --- a/thrift/lib/cpp2/op/detail/Encode.h
 +++ b/thrift/lib/cpp2/op/detail/Encode.h
 @@ -453,19 +453,55 @@ struct Encode<type::enum_t<T>> {
@@ -2612,7 +4697,7 @@ index 9535af84bfeda44aace6868154236419e68657b6..ca416280c7d75f9abf1366869ffe2417
  template <typename Tag>
  struct Decode<type::list<Tag>> {
    template <typename Protocol, typename ListType>
-@@ -645,11 +680,33 @@ struct Decode<type::list<Tag>> {
+@@ -645,11 +680,37 @@ struct Decode<type::list<Tag>> {
      TType t;
      uint32_t s;
      prot.readListBegin(t, s);
@@ -2632,6 +4717,10 @@ index 9535af84bfeda44aace6868154236419e68657b6..ca416280c7d75f9abf1366869ffe2417
 +           std::is_same_v<ElemT, std::int64_t>) &&
 +          apache::thrift::detail::pm::
 +              can_batch_int_list_read_v<Protocol, ListType, ElemT>) {
++        // Reject an impossible element count before resizing the destination.
++        if (!apache::thrift::canReadNElements(prot, s, {t})) {
++          protocol::TProtocolException::throwTruncatedData();
++        }
 +        const std::size_t old_size = list.size();
 +        list.resize(old_size + s);
 +        if constexpr (std::is_same_v<ElemT, std::int16_t>) {
@@ -2912,10 +5001,10 @@ index 54e9487e203cce4d9a29fecb8791438acbdbf6e8..4c643325584a60bd8e2dd44c83fc7643
     *
 diff --git a/thrift/lib/cpp2/protocol/CompactProtocolSve.cpp b/thrift/lib/cpp2/protocol/CompactProtocolSve.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7d91d94ab7194276ba6b0d3e50a389ea4661b943
+index 0000000000000000000000000000000000000000..b3abaa4262e6493fb02d71dcdce3d2d1c529add4
 --- /dev/null
 +++ b/thrift/lib/cpp2/protocol/CompactProtocolSve.cpp
-@@ -0,0 +1,400 @@
+@@ -0,0 +1,399 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -3031,7 +5120,7 @@ index 0000000000000000000000000000000000000000..7d91d94ab7194276ba6b0d3e50a389ea
 +  constexpr size_t kBatchReserve = 8 * 5 + 8;
 +
 +  uint32_t i = 0;
-+  for (; i + 8 <= size; i += 8) {
++  for (; size - i >= 8; i += 8) {
 +    out.ensure(kBatchReserve);
 +    uint8_t* const batch_start = out.writableData();
 +    uint8_t* ptr = batch_start;
@@ -3159,7 +5248,7 @@ index 0000000000000000000000000000000000000000..7d91d94ab7194276ba6b0d3e50a389ea
 +  constexpr size_t kBatchReserve = 4 * 10 + 8;
 +
 +  uint32_t i = 0;
-+  for (; i + 4 <= size; i += 4) {
++  for (; size - i >= 4; i += 4) {
 +    out.ensure(kBatchReserve);
 +    uint8_t* const batch_start = out.writableData();
 +    uint8_t* ptr = batch_start;
@@ -3263,7 +5352,7 @@ index 0000000000000000000000000000000000000000..7d91d94ab7194276ba6b0d3e50a389ea
 +  return written;
 +}
 +
-+bool detectRuntimeSve2() {
++bool detectHardwareSve2() {
 +#if defined(__linux__)
 +  unsigned long hwcap2 = ::getauxval(AT_HWCAP2);
 +  if (!(hwcap2 & HWCAP2_SVE2)) {
@@ -3273,10 +5362,7 @@ index 0000000000000000000000000000000000000000..7d91d94ab7194276ba6b0d3e50a389ea
 +    return false;
 +  }
 +#endif
-+  // VL must be exactly 256 bits (svcntw() == 8 / svcntd() == 4). The kernels
-+  // are hand-tuned for this layout. If the VL does not match we fall back to
-+  // the scalar encoder at runtime.
-+  return svcntw() == 8u && svcntd() == 4u;
++  return true;
 +}
 +
 +#endif // THRIFT_HAS_ARM_SVE2
@@ -3285,8 +5371,10 @@ index 0000000000000000000000000000000000000000..7d91d94ab7194276ba6b0d3e50a389ea
 +
 +bool hasRuntimeSve2() {
 +#if defined(THRIFT_HAS_ARM_SVE2)
-+  static const bool v = detectRuntimeSve2();
-+  return v;
++  static const bool hardware = detectHardwareSve2();
++  // Vector length is per-thread and can change after the first call.
++  // These kernels require exactly 256 bits; other lengths use scalar encoding.
++  return hardware && svcntw() == 8u && svcntd() == 4u;
 +#else
 +  return false;
 +#endif
@@ -3398,10 +5486,10 @@ index f1e68d4e3f443a68720556f8ce789182ccf1eff6..b93d28af84a6620ae70915922ac728a3
  template <class L>
 diff --git a/thrift/lib/cpp2/protocol/detail/CompactProtocolSveDispatch.h b/thrift/lib/cpp2/protocol/detail/CompactProtocolSveDispatch.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..df9c56add24415c699df350be73f72f81403a994
+index 0000000000000000000000000000000000000000..7a85f500a7f666d2a7d2bdd305c870ae90950a71
 --- /dev/null
 +++ b/thrift/lib/cpp2/protocol/detail/CompactProtocolSveDispatch.h
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,71 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -3451,7 +5539,8 @@ index 0000000000000000000000000000000000000000..df9c56add24415c699df350be73f72f8
 +
 +// Returns true iff the host CPU supports SVE2 + SVE-BitPerm with VL == 256
 +// bits (svcntw() == 8, svcntd() == 4), and the library was built with SVE2
-+// support enabled. Cached on first call.
++// support enabled. CPU capabilities are cached; the calling thread's vector
++// length is checked on every call.
 +bool hasRuntimeSve2();
 +
 +// Encode `size` signed 32-bit integers as zigzag varints into `out`.
@@ -3671,10 +5760,77 @@ index 75e2f77f7b39023508a8e89cf120234ef00007f1..7601fb81da95b5ce26c4215a6993e6d3
  
    template <bool ZeroCopy, typename Protocol>
 diff --git a/thrift/lib/cpp2/server/BaseThriftServer.h b/thrift/lib/cpp2/server/BaseThriftServer.h
-index 90d6aa9f94b12a3f66b3c577333a3893ea31e0d4..f7859dd7a6a1387eaff00997ede362d093495bac 100644
+index 90d6aa9f94b12a3f66b3c577333a3893ea31e0d4..5aa5c42773b8b7e42916151f490f598e03bdbe9b 100644
 --- a/thrift/lib/cpp2/server/BaseThriftServer.h
 +++ b/thrift/lib/cpp2/server/BaseThriftServer.h
-@@ -650,12 +650,10 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
+@@ -290,6 +290,7 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
+ 
+  protected:
+   ThriftServerConfig thriftConfig_;
++  transport::THeader::ReadLimits headerReadLimits_;
+ 
+  private:
+   AdaptiveConcurrencyController adaptiveConcurrencyController_;
+@@ -342,6 +343,8 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
+    */
+   mutable std::mutex threadManagerMutex_;
+   std::shared_ptr<apache::thrift::concurrency::ThreadManager> threadManager_;
++  // Once setup has run, clearing the manager cannot trigger default recreation.
++  bool setupThreadManagerCalled_ = false;
+   // we need to make the wrapper stick to the server because the users calling
+   // getThreadManager are relying on the server to maintatin the tm lifetime
+   std::shared_ptr<apache::thrift::ThreadManagerLoggingWrapper>
+@@ -404,9 +407,16 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
+           threadManager) {
+     CHECK(configMutable());
+     std::lock_guard<std::mutex> lock(threadManagerMutex_);
+-    threadManager_ = threadManager;
+-    tmLoggingWrapper_ =
+-        std::make_shared<ThreadManagerLoggingWrapper>(threadManager_, this);
++    if (!threadManager && setupThreadManagerCalled_) {
++      throw std::logic_error("Cannot clear ThreadManager after server setup");
++    }
++    // Construct before changing the configuration; an empty manager means
++    // the first setup will choose a default, so its wrapper must also be empty.
++    auto wrapper = threadManager
++        ? std::make_shared<ThreadManagerLoggingWrapper>(threadManager, this)
++        : nullptr;
++    threadManager_ = std::move(threadManager);
++    tmLoggingWrapper_ = std::move(wrapper);
+   }
+ 
+   getHandlerFunc getHandler_;
+@@ -462,6 +472,9 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
+ 
+   void addServerEventHandler(
+       std::shared_ptr<server::TServerEventHandler> eventHandler) {
++    if (!eventHandler) {
++      throw std::invalid_argument("Server event handler must not be null");
++    }
+     eventHandlers_.push_back(eventHandler);
+   }
+ 
+@@ -554,6 +567,9 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
+   }
+ 
+   void setThreadManagerExecutor(folly::Executor::KeepAlive<> ka) {
++    if (!ka) {
++      throw std::invalid_argument("ThreadManager executor must not be null");
++    }
+     auto executor = std::make_shared<folly::VirtualExecutor>(std::move(ka));
+     threadManagerExecutors_.fill(executor);
+   }
+@@ -630,6 +646,9 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
+    */
+   void setThreadManagerFromExecutor(
+       folly::Executor* executor, std::string name = "") {
++    if (!executor) {
++      throw std::invalid_argument("ThreadManager executor must not be null");
++    }
+     if (THRIFT_FLAG(allow_resource_pools_set_thread_manager_from_executor)) {
+       setThreadManagerType(ThreadManagerType::EXECUTOR_ADAPTER);
+       setThreadManagerExecutor(executor);
+@@ -650,12 +669,10 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
     */
    std::shared_ptr<concurrency::ThreadManager> getThreadManager_deprecated()
        const override {
@@ -3687,7 +5843,7 @@ index 90d6aa9f94b12a3f66b3c577333a3893ea31e0d4..f7859dd7a6a1387eaff00997ede362d0
      return threadManager_;
    }
  
-@@ -672,7 +670,6 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
+@@ -672,7 +689,6 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
            .sharedPtrExecutor()
            .value();
      }
@@ -3695,7 +5851,7 @@ index 90d6aa9f94b12a3f66b3c577333a3893ea31e0d4..f7859dd7a6a1387eaff00997ede362d0
      return threadManager_;
    }
  
-@@ -684,7 +681,6 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
+@@ -684,7 +700,6 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
            .value()
            .get();
      }
@@ -3703,6 +5859,58 @@ index 90d6aa9f94b12a3f66b3c577333a3893ea31e0d4..f7859dd7a6a1387eaff00997ede362d0
      return threadManager_.get();
    }
  
+@@ -774,6 +789,16 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
+     return thriftConfig_.getMaxResponseSize().get();
+   }
+ 
++  // Header transport receive budgets. Configure before setup()/serve().
++  void setHeaderReadLimits(const transport::THeader::ReadLimits& limits) {
++    CHECK(configMutable());
++    limits.validate();
++    headerReadLimits_ = limits;
++  }
++  const transport::THeader::ReadLimits& getHeaderReadLimits() const {
++    return headerReadLimits_;
++  }
++
+   void setMaxResponseSize(uint64_t size) {
+     thriftConfig_.setMaxResponseSize(
+         folly::observer::makeStaticObserver(std::optional{size}),
+@@ -1010,6 +1035,9 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
+   virtual void setProcessorFactory(
+       std::shared_ptr<AsyncProcessorFactory> pFac) {
+     CHECK(configMutable());
++    if (!pFac) {
++      throw std::invalid_argument("Processor factory must not be null");
++    }
+     cpp2Pfac_ = pFac;
+     applicationServerInterface_ = nullptr;
+     for (auto* serviceHandler : cpp2Pfac_->getServiceHandlers()) {
+diff --git a/thrift/lib/cpp2/server/Cpp2Connection.cpp b/thrift/lib/cpp2/server/Cpp2Connection.cpp
+index 12773c9c8c5961987d875220980f498a6894b37c..9dd65a5df74ff97ee0e8e4909af7f7e7d2893f01 100644
+--- a/thrift/lib/cpp2/server/Cpp2Connection.cpp
++++ b/thrift/lib/cpp2/server/Cpp2Connection.cpp
+@@ -159,6 +159,7 @@ Cpp2Connection::Cpp2Connection(
+           worker_.get()),
+       transport_(transport),
+       executor_(worker_->getServer()->getHandlerExecutor_deprecated().get()) {
++  channel_->setHeaderReadLimits(worker_->getServer()->getHeaderReadLimits());
+   if (worker_->getServer()->resourcePoolSet().empty()) {
+     threadManager_ = worker_->getServer()->getThreadManager_deprecated();
+   }
+diff --git a/thrift/lib/cpp2/server/ThriftServer.h b/thrift/lib/cpp2/server/ThriftServer.h
+index bd2a7788fc21a0a3351d5a86e8e546d6668d1f5c..65d60afaae25eac811cfd48cf58b9493725b1c06 100644
+--- a/thrift/lib/cpp2/server/ThriftServer.h
++++ b/thrift/lib/cpp2/server/ThriftServer.h
+@@ -290,8 +290,6 @@ class ThriftServer : public apache::thrift::BaseThriftServer,
+ 
+   bool quickExitOnShutdownTimeout_ = false;
+ 
+-  bool setupThreadManagerCalled_ = false;
+-
+  protected:
+   folly::observer::CallbackHandle getSSLCallbackHandle();
+   folly::observer::CallbackHandle setMaxRequestsCallbackHandle{};
 diff --git a/thrift/lib/cpp2/test/CMakeLists.txt b/thrift/lib/cpp2/test/CMakeLists.txt
 new file mode 100644
 index 0000000000000000000000000000000000000000..0351f8a41080723b983f499f47f2d645f27d8bd1

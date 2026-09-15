@@ -143,7 +143,7 @@ git apply "$WORK/fbthrift-patches/fbthrift_folly.patch"
   
   如果Snappy版本低于1.1.8、仅安装了静态库，或者Folly与Benchmark实际加载了不同版本的`libsnappy.so`，后续编译Benchmark时可能出现以下错误。
   
-  ```text
+  ```output
   undefined symbol: _ZTIN6snappy6sourceE
   ```
   
@@ -202,7 +202,7 @@ AccLibBenchmark/
     └── run.py
 ```
 
-由于AccLibBenchmark作为压测工具的代码汇总，我们拉取后，只应用其中的`fbthrift_folly_benchmark`压测工具，以及`fb_folly_autobuild`的自动化脚本，如上图所示。
+由于AccLibBenchmark作为压测工具的代码汇总。拉取后，只应用其中的`fbthrift_folly_benchmark`压测工具，以及`fb_folly_autobuild`的自动化脚本，如上方目录结构所示。
 
 > **说明:** 使用脚本安装时，默认拉取优化代码版本。若需要由脚本应用补丁，请先按第1.3节完成补丁校验，再将`fbthrift_folly.patch`放在`fb_folly_autobuild/`目录下。脚本安装方式见第4章。
 
@@ -287,7 +287,7 @@ cmake --build "$BENCH/build" --parallel "$(nproc)"
 
 构建完成后应存在以下内容。
 
-```text
+```output
 $BENCH/build/press_server
 $BENCH/build/press_client
 ```
@@ -298,7 +298,7 @@ $BENCH/build/press_client
 
 全部组件和Benchmark编译完成后，相关目录结构如下。
 
-```text
+```output
 $WORK/
 ├── AccLibBenchmark/
 │   ├── fbthrift_folly_benchmark/
@@ -443,7 +443,7 @@ THRIFT_ENABLE_ARM_SVE2 = True
 
 2. 成功后检查。
 
-   ```text
+   ```output
    WORK/ins/fbthrift/bin/thrift1
    AccLibBenchmark/fbthrift_folly_benchmark/build/press_server
    AccLibBenchmark/fbthrift_folly_benchmark/build/press_client

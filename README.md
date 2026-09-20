@@ -19,10 +19,10 @@ FbThrift v1.1.0进一步覆盖网络收包、缓冲区分配、CPU任务调度�
 ```text
 fbthrift/
 ├── docs/                           # 文档目录
-│   ├── en/                         # 英文文档 English documents
-│   │   ├── api_reference.md        # API reference sheet
-│   │   ├── quick_start.md          # Menu for beginners
-│   │   └── release_notes.md        # Release notes
+│   ├── en/                         # 英文文档English documents
+│   │   ├── api_reference.md        # api_reference
+│   │   ├── quick_start.md          # quick_start
+│   │   └── release_notes.md        # release_notes
 │   └── LICENSE
 │   ├── zh/                         # 中文文档
 │   │   ├── api_reference.md        # API参考

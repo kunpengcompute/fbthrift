@@ -1,10 +1,11 @@
 # 快速入门
 
-> 适用版本：FbThrift v1.1.0
-
 本文档指导用户从零构建带四项请求链路优化的FbThrift，并编译、启动配套Benchmark。四项优化包括动态收包缓冲区、Folly IOBuf TLS内存池、ThreadManager direct-func和请求热路径去锁。
 
-## 1. 获取优化源码
+> ![表示说明的图片](public_sys-resources/icon-note.gif)**说明:**
+>本文档适用版本：FbThrift v1.1.0。
+
+## 创建工作目录并获取公共Benchmark仓库
 
 本项目提供两种获取优化源码的方式：按1.1节直接获取优化源码，或依次按1.2～1.4节获取基线源码、校验并应用补丁。完成后，进入第2章准备编译环境。
 
@@ -73,7 +74,10 @@ sha256sum --check --strict fbthrift_folly.patch.sha256
 fbthrift_folly.patch: OK
 ```
 
-中文环境可能显示“成功”。应确认输出对应的文件名为 `fbthrift_folly.patch`，且命令没有报告失败或格式错误。
+AccLibBenchmark作为压测工具的代码汇总。拉取后，只应用其中的`fbthrift_folly_benchmark`压测工具，以及`fb_folly_autobuild`的自动化脚本，如上方目录结构所示。
+
+>![表示说明的图片](public_sys-resources/icon-note.gif)**说明:**
+>使用脚本安装时,默认拉取优化代码版本，若基于开源仓需要代码补丁，请将补丁仓master分支下的`fbthrift_folly.patch`放在`fb_folly_autobuild/`目录下，脚本支持自动应用补丁。
 
 **3. 结果判定**
 
@@ -162,7 +166,8 @@ export CC="$(command -v clang-16)"
 export CXX="$(command -v clang++-16)"
 ```
 
->**说明**：如果系统没有Clang 16，可使用与目标架构匹配的LLVM二进制包。Folly、Fizz、Wangle、FbThrift和Benchmark必须使用同一组`CC`、`CXX`。
+>![表示说明的图片](public_sys-resources/icon-note.gif)**说明:**
+>如果系统没有Clang 16，可使用与目标架构匹配的LLVM二进制包。Folly、Fizz、Wangle、FbThrift和Benchmark必须使用同一组`CC`、`CXX`。
 
 ## 3. 手动编译
 
@@ -386,7 +391,7 @@ export LD_LIBRARY_PATH="$INS/fbthrift/lib:$INS/fbthrift/lib64:$INS/wangle/lib:$I
    test -f run.py
    ```
 
-如需由脚本应用优化补丁，请先按[第1.3节](#13-软件包完整性校验)完成校验，再将`fbthrift_folly.patch`放到当前目录。
+如[第一章](#创建工作目录并获取公共benchmark仓库)所言，若基于FbThrift v1.1.0发布包构建，需提供`fbthrift_folly.patch`补丁并将其放到当前目录。
 
 ### 4.2 适配公共仓库目录
 
@@ -461,7 +466,7 @@ THRIFT_ENABLE_ARM_SVE2 = True
    - `CONN_SETUPS`、`QD_SETUPS`、`DATA_SETUPS`：先使用小矩阵验证环境。
    - `OUTPUT_CSV`：设置结果文件名称，避免覆盖已有结果。
 
-2. 先按3.8节启动`press_server`，再执行以下命令。
+2. 先启动`press_server`，再执行以下命令。
 
    ```bash
    cd AccLibBenchmark/fb_folly_autobuild

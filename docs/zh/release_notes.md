@@ -34,7 +34,8 @@
 |--|--|--|
 |Debian 12等Linux系统|鲲鹏920处理器、鲲鹏950处理器等AArch64处理器|Clang 16|
 
-> **说明：** Binary Protocol优化不依赖SVE2指令集，在所有aarch64和x86-64平台上均可通过编译器自动向量化获得性能提升。Compact Protocol的SVE2优化仅在支持SVE2指令集的CPU上生效，不支持时自动回退到scalar路径。
+> ![表示说明的图片](public_sys-resources/icon-note.gif)**说明：**
+>Binary Protocol优化不依赖SVE2指令集，在所有aarch64和x86-64平台上均可通过编译器自动向量化获得性能提升。Compact Protocol的SVE2优化仅在支持SVE2指令集的CPU上生效，不支持时自动回退到scalar路径。
 
 ### 病毒扫描结果
 

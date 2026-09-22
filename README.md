@@ -19,10 +19,10 @@ FbThrift v1.1.0进一步覆盖网络收包、缓冲区分配、CPU任务调度�
 ```text
 fbthrift/
 ├── docs/                           # 文档目录
-│   ├── en/                         # 英文文档 English documents
-│   │   ├── api_reference.md        # API reference sheet
-│   │   ├── quick_start.md          # Menu for beginners
-│   │   └── release_notes.md        # Release notes
+│   ├── en/                         # 英文文档English documents
+│   │   ├── api_reference.md        # api_reference
+│   │   ├── quick_start.md          # quick_start
+│   │   └── release_notes.md        # release_notes
 │   └── LICENSE
 │   ├── zh/                         # 中文文档
 │   │   ├── api_reference.md        # API参考
@@ -57,7 +57,7 @@ fbthrift/
 
 ## 学习文档
 
-| 学习资源名称 | 资源简介 |
+| 学习文档名称 | 内容简介 |
 | --------- | --------- |
 | [快速入门](docs/zh/quick_start.md) | 提供手动编译、脚本编译和Benchmark运行指导。 |
 | [版本说明书](docs/zh/release_notes.md) | 提供v1.1.0版本信息、性能验证及兼容性说明。 |

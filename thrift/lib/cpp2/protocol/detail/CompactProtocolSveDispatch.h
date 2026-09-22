@@ -47,7 +47,8 @@ namespace compact {
 
 // Returns true iff the host CPU supports SVE2 + SVE-BitPerm with VL == 256
 // bits (svcntw() == 8, svcntd() == 4), and the library was built with SVE2
-// support enabled. Cached on first call.
+// support enabled. CPU capabilities are cached; the calling thread's vector
+// length is checked on every call.
 bool hasRuntimeSve2();
 
 // Encode `size` signed 32-bit integers as zigzag varints into `out`.

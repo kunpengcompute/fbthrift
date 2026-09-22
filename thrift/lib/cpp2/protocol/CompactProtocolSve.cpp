@@ -113,7 +113,7 @@ uint32_t varintEncode32SveKernel(
   constexpr size_t kBatchReserve = 8 * 5 + 8;
 
   uint32_t i = 0;
-  for (; i + 8 <= size; i += 8) {
+  for (; size - i >= 8; i += 8) {
     out.ensure(kBatchReserve);
     uint8_t* const batch_start = out.writableData();
     uint8_t* ptr = batch_start;
@@ -241,7 +241,7 @@ uint32_t varintEncode64SveKernel(
   constexpr size_t kBatchReserve = 4 * 10 + 8;
 
   uint32_t i = 0;
-  for (; i + 4 <= size; i += 4) {
+  for (; size - i >= 4; i += 4) {
     out.ensure(kBatchReserve);
     uint8_t* const batch_start = out.writableData();
     uint8_t* ptr = batch_start;
@@ -345,7 +345,7 @@ uint32_t varintEncode64SveKernel(
   return written;
 }
 
-bool detectRuntimeSve2() {
+bool detectHardwareSve2() {
 #if defined(__linux__)
   unsigned long hwcap2 = ::getauxval(AT_HWCAP2);
   if (!(hwcap2 & HWCAP2_SVE2)) {
@@ -355,10 +355,7 @@ bool detectRuntimeSve2() {
     return false;
   }
 #endif
-  // VL must be exactly 256 bits (svcntw() == 8 / svcntd() == 4). The kernels
-  // are hand-tuned for this layout. If the VL does not match we fall back to
-  // the scalar encoder at runtime.
-  return svcntw() == 8u && svcntd() == 4u;
+  return true;
 }
 
 #endif // THRIFT_HAS_ARM_SVE2
@@ -367,8 +364,10 @@ bool detectRuntimeSve2() {
 
 bool hasRuntimeSve2() {
 #if defined(THRIFT_HAS_ARM_SVE2)
-  static const bool v = detectRuntimeSve2();
-  return v;
+  static const bool hardware = detectHardwareSve2();
+  // Vector length is per-thread and can change after the first call.
+  // These kernels require exactly 256 bits; other lengths use scalar encoding.
+  return hardware && svcntw() == 8u && svcntd() == 4u;
 #else
   return false;
 #endif

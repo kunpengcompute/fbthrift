@@ -79,6 +79,7 @@ unique_ptr<IOBuf> HeaderServerChannel::ServerFramingHandler::addFrame(
 std::tuple<unique_ptr<IOBuf>, size_t, unique_ptr<THeader>, size_t>
 HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
   std::unique_ptr<THeader> header(new THeader(THeader::ALLOW_BIG_FRAMES));
+  header->setReadLimits(channel_.headerReadLimits_);
   // removeHeader will set seqid in header.
   // For older clients with seqid in the protocol, header
   // will dig in to the protocol to get the seqid correctly.
@@ -89,8 +90,12 @@ HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
   std::unique_ptr<folly::IOBuf> buf;
   size_t remaining = 0;
   size_t frameLength = 0;
+  // THeader stages parsing/decompression internally. Keep the connection state
+  // unchanged until the channel's additional payload validation also succeeds.
+  auto persistentReadHeaders = channel_.persistentReadHeaders_;
   try {
-    buf = header->removeHeader(q, remaining, channel_.persistentReadHeaders_, frameLength);
+    buf =
+        header->removeHeader(q, remaining, persistentReadHeaders, frameLength);
   } catch (const std::exception& e) {
     LOG(ERROR) << "Received invalid request from client: "
                << folly::exceptionStr(e) << " "
@@ -144,6 +149,7 @@ HeaderServerChannel::ServerFramingHandler::removeFrame(IOBufQueue* q) {
                << getTHeaderPayloadString(buf.get());
   }
 
+  channel_.persistentReadHeaders_.swap(persistentReadHeaders);
   return make_tuple(std::move(buf), 0, std::move(header), frameLength);
 }
 

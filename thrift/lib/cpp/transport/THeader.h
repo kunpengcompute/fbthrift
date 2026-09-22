@@ -18,6 +18,7 @@
 #define THRIFT_TRANSPORT_THEADER_H_ 1
 
 #include <functional>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string_view>
@@ -29,6 +30,7 @@
 #include <folly/portability/Unistd.h>
 #include <thrift/lib/cpp/concurrency/Thread.h>
 #include <thrift/lib/cpp/protocol/TProtocolTypes.h>
+#include <thrift/lib/cpp/transport/TTransportException.h>
 #include <thrift/lib/thrift/gen-cpp2/RpcMetadata_types.h>
 
 #include <bitset>
@@ -145,6 +147,30 @@ class THeader final {
 
   explicit THeader(int options = 0);
 
+  // Receive-side limits, copied into each connection/frame. Byte budgets count
+  // key/value bytes or decoded payload bytes, not allocator/object overhead.
+  struct ReadLimits {
+    uint64_t maxUncompressedBytes = 64ULL << 20;
+    // Sum of compressed input and produced output across all transform layers.
+    uint64_t maxDecompressionWorkBytes = 128ULL << 20;
+    uint16_t maxTransforms = 4;
+    // ZSTD decoder history window: 2^23 bytes, independent of output budget.
+    unsigned zstdWindowLogMax = 23;
+    uint32_t maxHeaderBytes = 256U << 10;
+    uint64_t maxPersistentHeaderBytes = 64ULL << 10;
+    size_t maxPersistentHeaders = 1024;
+    uint64_t maxReadHeaderBytes = 256ULL << 10;
+    size_t maxReadHeaders = 2048;
+
+    void validate() const;
+  };
+
+  void setReadLimits(const ReadLimits& limits) {
+    limits.validate();
+    readLimits_ = limits;
+  }
+  const ReadLimits& getReadLimits() const { return readLimits_; }
+
   void setClientType(CLIENT_TYPE ct) { this->clientType_ = ct; }
   // Force using specified client type when using legacy client types
   // i.e. sniffing out client type is disabled.
@@ -186,6 +212,10 @@ class THeader final {
    */
   static std::unique_ptr<folly::IOBuf> untransform(
       std::unique_ptr<folly::IOBuf>, std::vector<uint16_t>& readTrans);
+  static std::unique_ptr<folly::IOBuf> untransform(
+      std::unique_ptr<folly::IOBuf>,
+      std::vector<uint16_t>& readTrans,
+      const ReadLimits& limits);
 
   /**
    * Transform the data based on our write transform flags
@@ -206,6 +236,11 @@ class THeader final {
   void copyMetadataFrom(const THeader& src);
 
   static uint16_t getNumTransforms(const std::vector<uint16_t>& transforms) {
+    if (transforms.size() > std::numeric_limits<uint16_t>::max()) {
+      throw TTransportException(
+          TTransportException::INVALID_FRAME_SIZE,
+          "Too many Header transforms");
+    }
     return folly::to_narrow(transforms.size());
   }
 
@@ -443,6 +478,7 @@ class THeader final {
 
   std::vector<uint16_t> readTrans_;
   std::vector<uint16_t> writeTrans_;
+  ReadLimits readLimits_;
 
   // Map to use for headers
   std::optional<StringToStringMap> readHeaders_;

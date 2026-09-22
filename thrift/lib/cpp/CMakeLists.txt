@@ -89,6 +89,16 @@ target_link_libraries(
     ${ZSTD_LIBRARIES}
 )
 
+if(enable_tests)
+  thrift_gtest(
+    theader_resource_limits
+    transport/test/THeaderResourceLimitsTest.cpp
+    "-Wl,--start-group"
+    transport thriftprotocol rpcmetadata thrift-core
+    "-Wl,--end-group"
+  )
+endif()
+
 add_library(
   async
 

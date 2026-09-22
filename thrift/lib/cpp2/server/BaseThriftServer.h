@@ -290,6 +290,7 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
 
  protected:
   ThriftServerConfig thriftConfig_;
+  transport::THeader::ReadLimits headerReadLimits_;
 
  private:
   AdaptiveConcurrencyController adaptiveConcurrencyController_;
@@ -342,6 +343,8 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
    */
   mutable std::mutex threadManagerMutex_;
   std::shared_ptr<apache::thrift::concurrency::ThreadManager> threadManager_;
+  // Once setup has run, clearing the manager cannot trigger default recreation.
+  bool setupThreadManagerCalled_ = false;
   // we need to make the wrapper stick to the server because the users calling
   // getThreadManager are relying on the server to maintatin the tm lifetime
   std::shared_ptr<apache::thrift::ThreadManagerLoggingWrapper>
@@ -404,9 +407,16 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
           threadManager) {
     CHECK(configMutable());
     std::lock_guard<std::mutex> lock(threadManagerMutex_);
-    threadManager_ = threadManager;
-    tmLoggingWrapper_ =
-        std::make_shared<ThreadManagerLoggingWrapper>(threadManager_, this);
+    if (!threadManager && setupThreadManagerCalled_) {
+      throw std::logic_error("Cannot clear ThreadManager after server setup");
+    }
+    // Construct before changing the configuration; an empty manager means
+    // the first setup will choose a default, so its wrapper must also be empty.
+    auto wrapper = threadManager
+        ? std::make_shared<ThreadManagerLoggingWrapper>(threadManager, this)
+        : nullptr;
+    threadManager_ = std::move(threadManager);
+    tmLoggingWrapper_ = std::move(wrapper);
   }
 
   getHandlerFunc getHandler_;
@@ -462,6 +472,9 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
 
   void addServerEventHandler(
       std::shared_ptr<server::TServerEventHandler> eventHandler) {
+    if (!eventHandler) {
+      throw std::invalid_argument("Server event handler must not be null");
+    }
     eventHandlers_.push_back(eventHandler);
   }
 
@@ -554,6 +567,9 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
   }
 
   void setThreadManagerExecutor(folly::Executor::KeepAlive<> ka) {
+    if (!ka) {
+      throw std::invalid_argument("ThreadManager executor must not be null");
+    }
     auto executor = std::make_shared<folly::VirtualExecutor>(std::move(ka));
     threadManagerExecutors_.fill(executor);
   }
@@ -630,6 +646,9 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
    */
   void setThreadManagerFromExecutor(
       folly::Executor* executor, std::string name = "") {
+    if (!executor) {
+      throw std::invalid_argument("ThreadManager executor must not be null");
+    }
     if (THRIFT_FLAG(allow_resource_pools_set_thread_manager_from_executor)) {
       setThreadManagerType(ThreadManagerType::EXECUTOR_ADAPTER);
       setThreadManagerExecutor(executor);
@@ -768,6 +787,16 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
 
   uint64_t getMaxResponseSize() const final {
     return thriftConfig_.getMaxResponseSize().get();
+  }
+
+  // Header transport receive budgets. Configure before setup()/serve().
+  void setHeaderReadLimits(const transport::THeader::ReadLimits& limits) {
+    CHECK(configMutable());
+    limits.validate();
+    headerReadLimits_ = limits;
+  }
+  const transport::THeader::ReadLimits& getHeaderReadLimits() const {
+    return headerReadLimits_;
   }
 
   void setMaxResponseSize(uint64_t size) {
@@ -1006,6 +1035,9 @@ class BaseThriftServer : public apache::thrift::concurrency::Runnable,
   virtual void setProcessorFactory(
       std::shared_ptr<AsyncProcessorFactory> pFac) {
     CHECK(configMutable());
+    if (!pFac) {
+      throw std::invalid_argument("Processor factory must not be null");
+    }
     cpp2Pfac_ = pFac;
     applicationServerInterface_ = nullptr;
     for (auto* serviceHandler : cpp2Pfac_->getServiceHandlers()) {

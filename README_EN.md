@@ -1,72 +1,82 @@
-# Introduction to fbthrift Serialization Optimization
+# FbThrift Request Path Optimization Introduction
 
-English|[简体中文](README.md)
+English|[简体中文](./README.md)
 
-## Latest Updates
+## Latest News
 
-- [2026-06-30]: Released the patch repository v1.0.0 based on Meta's open-source fbthrift serialization. This optimization targets the fbthrift serialization framework to perform batch integer array encoding, significantly improving serialization performance through the Arm SVE2 instruction set and automatic compiler vectorization.
+- [2026.09.30]: Released the FbThrift v1.1.0 optimization patch. Added dynamic receive buffer, Folly IOBuf TLS memory pool, ThreadManager direct-func, and lock removal on the request hot path, along with a complete benchmark and automated build pipeline.
+- [2026.06.30]: Released the FbThrift v1.0.0 patch based on Meta's open-source FbThrift serialization framework. This patch optimizes batch encoding of integer arrays in the FbThrift serialization framework, significantly improving serialization performance through the Arm SVE2 instruction set and compiler auto-vectorization.
 
 ## Project Introduction
 
-fbthrift is a high-performance RPC framework and serialization library open-sourced by Meta, widely used in distributed systems and microservice architectures. It supports multiple languages (such as C++, Java, and Python), and its serialization component provides a rich set of serialization protocols (such as Compact Protocol and Binary Protocol).
+FbThrift is a high-performance RPC framework and serialization library open sourced by Meta. It is widely used in distributed systems and microservice architectures, and supports transport methods such as Compact Protocol, Binary Protocol, Header, and Rocket.
 
-This project is an optimization repository targeting the fbthrift serialization framework, focusing on the serialization performance optimization of contiguous integer arrays (such as `list<int32_t>` and `list<int64_t>`). By default, fbthrift employs per-element encoding and decoding. This approach involves strong data dependencies, making it difficult for the compiler to perform auto-vectorization (SIMD), which causes serialization to become a bottleneck when processing large-scale arrays.
-
-The core ideas of this optimization solution are as follows:
-
-- **Compact Protocol**: Introduces batch Varint encoding logic based on Arm SVE2, utilizing `dispatchVarintEncode32` for cross-translation-unit runtime dispatch, which automatically enables the vectorized kernel on CPUs supporting SVE2.
-- **Binary Protocol**: Introduces a tight loop based on `memcpy` and `bswap`, leveraging automatic compiler vectorization to boost performance without requiring specific CPU instruction set support.
-- **Zero intrusion**: Remains transparent to downstream service code without requiring any changes to compilation options or service logic, as the SFINAE mechanism automatically selects the optimal path.
+This project performs performance optimization on the end-to-end request path of FbThrift. FbThrift v1.0.0 provides batch serialization optimization for Compact Protocol and Binary Protocol.
+FbThrift v1.1.0 further covers network packet reception, buffer allocation, CPU task scheduling, and the common request path, reducing system calls, memory allocation, and synchronization overhead in high-QPS scenarios.
 
 ## Directory Structure
 
 ```text
 fbthrift/
 ├── docs/                           # Documentation directory
-│   ├── en/                         # English documentation
-│   │   ├── api_reference.md        # API reference
+│   ├── en/                         # English documents
+│   │   ├── api_reference.md        # api_reference
+│   │   ├── quick_start.md          # quick_start
+│   │   └── release_notes.md        # release_notes
+│   └── LICENSE
+│   ├── zh/                         # Chinese documents
+│   │   ├── api_reference.md        # API Reference
 │   │   ├── quick_start.md          # Quick Start
 │   │   └── release_notes.md        # Release Notes
 │   └── LICENSE
 ├── LICENSE
-├── fbthrift_opt_simd.patch         # fbthrift serialization optimization patch
-└── README_EN.md                    # Project introduction
+├── fbthrift_opt_simd.patch         # FbThrift v1.1.0 optimization patch file
+└── README.md                       # Project introduction
 ```
+
+## Feature Description
+
+### v1.1.0 Optimization Features
+
+| Optimization | Location | Core Approach |
+| -- | -- | -- |
+| Dynamic receive buffer | network packet reception | Dynamically adjusts the read buffer based on recent complete frame lengths, reducing the number of `recv()` calls for large messages. |
+| Folly IOBuf TLS memory pool | Buffer allocation | Reuses data blocks per thread and splits them into slices, reducing frequent `malloc/free` calls. |
+| ThreadManager direct-func | CPU task scheduling | The `Task` directly stores and executes `folly::Func`, avoiding the creation of a `FunctionRunner` for regular RPCs. |
+| Lock removal on the request hot path | Common request path | Removes redundant locks that no longer provide effective concurrent write protection, reducing multi-core contention. |
+
+Each optimization retains the necessary compatibility or fallback path. For specific interfaces, build methods, and risk boundaries, see the documentation.
 
 ## Release Notes
 
-For details about the version release of the fbthrift serialization optimization patch repository, see [Release Notes](docs/en/release_notes.md).
+For details about the version release of the FbThrift performance optimization patch repository, see [Release Notes](docs/en/release_notes.md).
 
 ## Quick Start
 
-For details about how to compile, install, and test the fbthrift serialization optimization patch, see [Quick Start](docs/en/quick_start.md).
+For complete instructions on compiling the optimized FbThrift from scratch and running the benchmark, see [Quick Start](docs/en/quick_start.md).
 
 ## Documentation
 
-| Document Name| Description|
-|---------|---------|
-| [Quick Start](docs/en/quick_start.md)| Provides guidance on how to compile, install, and test the fbthrift serialization optimization patch repository.|
-| [Release Notes](docs/en/release_notes.md)| Provides basic version information and updates of the fbthrift serialization optimization patch repository.|
-| [API Reference](docs/en/api_reference.md)| Describes the optimized fbthrift serialization APIs and related modifications.|
+| Document | Description |
+| --------- | --------- |
+| [Quick Start](docs/en/quick_start.md) | Provides guidance on manual compilation, script-based compilation, and benchmark execution. |
+| [Release Notes](docs/en/release_notes.md) | Provides v1.1.0 version information, performance verification, and compatibility notes. |
+| [API Reference](docs/en/api_reference.md) | Provides serialization, ThreadManager, and Header interface descriptions by version. |
 
 ## Disclaimer
 
-This code repository contributes to the fbthrift open-source project solely for performance optimization of certain fbthrift serialization functions. It strictly adheres to the coding style and methods, as well as security design of the native open-source software. Any vulnerability and security issues of the software shall be resolved by the corresponding upstream communities according to their response mechanisms. Please pay attention to the notifications and version updates released by the upstream communities. This code repository does not assume any responsibility for software vulnerabilities and security issues.
+This repository participates in the open-source FbThrift project and provides performance optimizations for the FbThrift request path and serialization path. The code follows the design and coding style of the open-source software and retains the necessary compatibility and fallback mechanisms. Any vulnerabilities and security issues in the software are addressed by the corresponding upstream community in accordance with its vulnerability and security response mechanisms. Please pay close attention to notifications and version updates released by the upstream community.
 
 ## License
 
-The fbthrift patch repository is licensed under Apache-2.0. For details, see [LICENSE](LICENSE).
+FbThrift is licensed under Apache-2.0. For details, see [LICENSE](LICENSE).
 
-The documents of this project are licensed under CC-BY 4.0. For details, see [LICENSE](docs/LICENSE).
+The documentation of this project is licensed under CC-BY 4.0. For details, see [LICENSE](docs/LICENSE).
 
-## Contribution Guide
+## Contribution Statement
 
-If you have any questions or want to provide feedback on feature requirements and bug reports, you can submit an issue.
-
-## Suggestions and Feedback
-
-You are welcome to contribute to the community. If you have any questions or suggestions, please submit an issue. We will respond as soon as possible. Thank you for your support.
+We welcome your contributions to the community. If you have any questions/suggestions or want to provide feedback on feature requirements and bug reports, you can submit [issues](https://gitcode.com/boostkit/community/blob/master/docs/contributor/issue-submit.md). For details, see the [contribution guideline](https://gitcode.com/boostkit/community/blob/master/docs/contributor/contributing.md). You are also welcome to share insights in [Discussions](https://gitcode.com/boostkit/community/discussions). Thank you for your support.
 
 ## Acknowledgments
 
-Thank you to everyone in the community for your PRs. We warmly welcome contributions to the fbthrift patch repository!
+Thank you for every PR from the community. Contributions to FbThrift are welcome!

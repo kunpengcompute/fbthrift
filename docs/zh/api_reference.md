@@ -59,7 +59,7 @@ void ThreadManager::Impl::addFunc(
 const std::shared_ptr<Runnable>& ThreadManager::Task::getRunnable() const;
 ```
 
->![表示说明的图片](public_sys-resources/icon-note.gif)**说明:**
+>![表示说明的图片](public_sys-resources/icon-note.gif) **说明:**
 >该接口是惰性兼容路径，不属于普通RPC任务的常规执行路径。
 
 ### Header帧解析与自适应读缓冲接口
@@ -122,7 +122,7 @@ readSize = std::clamp(avgRequestSize_ * 16, size_t(2048), size_t(524288));
 
 计算结果用于刷新Pipeline读缓冲设置，缓冲区范围限制为2KB至512KB。不完整帧场景还会综合`remaining`与队列尾部可用空间，减少大帧的重复读取，同时避免小请求长期占用过大的固定缓冲区。
 
-> ![表示说明的图片](public_sys-resources/icon-note.gif)**兼容性说明：**
+> ![表示说明的图片](public_sys-resources/icon-note.gif) **兼容性说明：**
 >自适应逻辑会在读路径中刷新缓冲设置。依赖`setReadBufferSize()`固定缓冲区语义的调用方，应在升级到FbThrift v1.1.0时执行回归验证。
 
 ## FbThrift v1.0.0

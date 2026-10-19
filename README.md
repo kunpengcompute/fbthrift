@@ -59,9 +59,9 @@ fbthrift/
 
 | 学习文档名称 | 内容简介 |
 | --------- | --------- |
-| [快速入门](docs/zh/quick_start.md) | 提供手动编译、脚本编译和Benchmark运行指导。 |
-| [版本说明书](docs/zh/release_notes.md) | 提供v1.1.0版本信息、性能验证及兼容性说明。 |
-| [API参考](docs/zh/api_reference.md) | 按版本提供序列化、ThreadManager和Header接口说明。 |
+| 《[快速入门](docs/zh/quick_start.md)》 | 提供手动编译、脚本编译和Benchmark运行指导。 |
+| 《[版本说明书](docs/zh/release_notes.md)》 | 提供v1.1.0版本信息、性能验证及兼容性说明。 |
+| 《[API参考](docs/zh/api_reference.md)》 | 按版本提供序列化、ThreadManager和Header接口说明。 |
 
 ## 免责声明
 

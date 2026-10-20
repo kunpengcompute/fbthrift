@@ -304,6 +304,7 @@ add_library(
   server/ServerInstrumentation.cpp
   server/ServiceHealthPoller.cpp
   server/ThriftProcessor.cpp
+  server/IOWorkerContext.cpp
   server/ThriftServer.cpp
   server/ThriftServerConfig.cpp
   server/peeking/TLSHelper.cpp
@@ -397,3 +398,14 @@ install(
   EXPORT fbthrift-exports
   DESTINATION ${LIB_INSTALL_DIR}
 )
+
+if(enable_tests)
+  add_executable(ReplyQueueBackendYieldTest-t
+    server/test/ReplyQueueBackendYieldTest.cpp
+  )
+  target_link_libraries(ReplyQueueBackendYieldTest-t
+    Folly::folly ${GTEST_BOTH_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT}
+  )
+  add_test(NAME ReplyQueueBackendYieldTest COMMAND ReplyQueueBackendYieldTest-t)
+  set_tests_properties(ReplyQueueBackendYieldTest PROPERTIES TIMEOUT 30)
+endif()

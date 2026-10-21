@@ -306,6 +306,7 @@ add_library(
   server/ThriftProcessor.cpp
   server/IOWorkerContext.cpp
   server/ThriftServer.cpp
+  server/detail/UrmaServerRuntime.cpp
   server/ThriftServerConfig.cpp
   server/peeking/TLSHelper.cpp
   transport/core/RpcMetadataUtil.cpp
@@ -400,6 +401,13 @@ install(
 )
 
 if(enable_tests)
+  add_executable(UrmaServerTest-t server/test/UrmaServerTest.cpp)
+  target_link_libraries(UrmaServerTest-t
+    thriftcpp2 ${GTEST_BOTH_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT}
+  )
+  add_test(NAME UrmaServerTest COMMAND UrmaServerTest-t)
+  set_tests_properties(UrmaServerTest PROPERTIES TIMEOUT 60)
+
   add_executable(ReplyQueueBackendYieldTest-t
     server/test/ReplyQueueBackendYieldTest.cpp
   )

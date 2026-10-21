@@ -21,6 +21,7 @@
 
 #include <iostream>
 #include <random>
+#include <stdexcept>
 #include <utility>
 #include <variant>
 
@@ -55,6 +56,7 @@
 #include <thrift/lib/cpp2/server/ServerFlags.h>
 #include <thrift/lib/cpp2/server/ServerInstrumentation.h>
 #include <thrift/lib/cpp2/server/ThriftProcessor.h>
+#include <thrift/lib/cpp2/server/detail/UrmaServerRuntime.h>
 #include <thrift/lib/cpp2/transport/core/ManagedConnectionIf.h>
 #include <thrift/lib/cpp2/transport/rocket/server/RocketRoutingHandler.h>
 #include <thrift/lib/cpp2/transport/rocket/server/RocketServerConnection.h>
@@ -423,6 +425,35 @@ void ThriftServer::touchRequestTimestamp() noexcept {
   }
 }
 
+void ThriftServer::prepareUrma() {
+  if (!useUrma_) {
+    return;
+  }
+#ifdef FOLLY_HAVE_URMA
+  if (preferIoUring_ || isDuplex_ || serverChannel_ || acceptorFactory_) {
+    throw std::invalid_argument(
+        "URMA does not support io_uring sockets, duplex servers or custom acceptors");
+  }
+  // The upstream global "disabled" flag bypasses the default REQUIRED policy
+  // in CheckTLSPeekingManager. Honor that default, but never an explicit TLS
+  // requirement or configured credentials on this plaintext-only transport.
+  if ((sslPolicy_ == SSLPolicy::REQUIRED &&
+       (sslPolicyExplicit_ || FLAGS_thrift_ssl_policy != "disabled")) ||
+      strictSSL_ || sslContextObserver_) {
+    throw std::invalid_argument("The basic URMA transport does not support TLS");
+  }
+  if (urmaConfig_.dev_name.empty()) {
+    throw std::invalid_argument("URMA requires an explicit device name");
+  }
+  if (urmaRuntime_) {
+    throw std::logic_error("URMA server is already initialized");
+  }
+  urmaRuntime_ = std::make_shared<detail::UrmaServerRuntime>(urmaConfig_);
+#else
+  throw std::runtime_error("URMA requires Folly built with FOLLY_USE_URMA=ON");
+#endif
+}
+
 void ThriftServer::setup() {
   ensureDecoratedProcessorFactoryInitialized();
 
@@ -462,6 +493,8 @@ void ThriftServer::setup() {
     sigemptyset(&sa.sa_mask);
     sigaction(SIGPIPE, &sa, nullptr);
 #endif
+
+    prepareUrma();
 
     if (!getObserver() && server::observerFactory_) {
       setObserver(server::observerFactory_->getObserver());
@@ -1311,6 +1344,9 @@ void ThriftServer::stopWorkers() {
   DCHECK(!duplexWorker_);
   ServerBootstrap::stop();
   ServerBootstrap::join();
+#ifdef FOLLY_HAVE_URMA
+  urmaRuntime_.reset();
+#endif
   thriftConfig_.unfreeze();
 }
 
@@ -1527,6 +1563,12 @@ void ThriftServer::stopCPUWorkers() {
 
 void ThriftServer::handleSetupFailure(void) {
   ServerBootstrap::stop();
+#ifdef FOLLY_HAVE_URMA
+  if (urmaRuntime_) {
+    ServerBootstrap::join();
+    urmaRuntime_.reset();
+  }
+#endif
 
   // avoid crash on stop()
   idleServer_.reset();

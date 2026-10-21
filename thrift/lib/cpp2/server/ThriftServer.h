@@ -41,6 +41,9 @@
 #include <folly/io/async/AsyncServerSocket.h>
 #include <folly/io/async/EventBase.h>
 #include <folly/io/async/EventBaseManager.h>
+#ifdef FOLLY_HAVE_URMA
+#include <folly/io/async/urma/UrmaConfig.h>
+#endif
 #include <folly/lang/Badge.h>
 #include <folly/synchronization/CallOnce.h>
 #include <thrift/lib/cpp/concurrency/PosixThreadFactory.h>
@@ -85,6 +88,9 @@ class Cpp2Connection;
 class Cpp2Worker;
 class ThriftServer;
 class ThriftProcessor;
+namespace detail {
+class UrmaServerRuntime;
+}
 namespace rocket {
 class ThriftRocketServerHandler;
 }
@@ -166,6 +172,7 @@ class ThriftServer : public apache::thrift::BaseThriftServer,
 
   // Security negotiation settings
   SSLPolicy sslPolicy_{SSLPolicy::REQUIRED};
+  bool sslPolicyExplicit_{false};
   bool strictSSL_ = false;
   // whether we allow plaintext connections from loopback in REQUIRED mode
   bool allowPlaintextOnLoopback_ = false;
@@ -177,6 +184,13 @@ class ThriftServer : public apache::thrift::BaseThriftServer,
   bool allowCheckUnimplementedExtraInterfaces_ = true;
 
   bool preferIoUring_ = false;
+  bool useUrma_ = false;
+#ifdef FOLLY_HAVE_URMA
+  folly::UrmaConfig urmaConfig_;
+  std::shared_ptr<detail::UrmaServerRuntime> urmaRuntime_;
+#endif
+
+  void prepareUrma();
 
   std::weak_ptr<folly::ShutdownSocketSet> wShutdownSocketSet_;
 
@@ -641,6 +655,22 @@ class ThriftServer : public apache::thrift::BaseThriftServer,
 
   bool preferIoUring() const { return preferIoUring_; }
 
+  // Configure before setup(). The listening TCP socket exchanges URMA
+  // endpoints; RPC data then uses Folly's basic RM SEND/RECV transport.
+  void setUseUrma(bool enabled) {
+    CHECK(configMutable());
+    useUrma_ = enabled;
+  }
+  bool getUseUrma() const { return useUrma_; }
+
+#ifdef FOLLY_HAVE_URMA
+  void setUrmaConfig(const folly::UrmaConfig& config) {
+    CHECK(configMutable());
+    urmaConfig_ = config;
+  }
+  const folly::UrmaConfig& getUrmaConfig() const { return urmaConfig_; }
+#endif
+
   /**
    * Tells the thrift server to update ticket seeds with the contents of the
    * file ticketPath when modified and initialized the seeds with the contents
@@ -749,7 +779,10 @@ class ThriftServer : public apache::thrift::BaseThriftServer,
 
   SSLPolicy getSSLPolicy() const { return sslPolicy_; }
 
-  void setSSLPolicy(SSLPolicy policy) { sslPolicy_ = policy; }
+  void setSSLPolicy(SSLPolicy policy) {
+    sslPolicy_ = policy;
+    sslPolicyExplicit_ = true;
+  }
 
   void setStrictSSL(bool strictSSL) { strictSSL_ = strictSSL; }
 

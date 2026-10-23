@@ -39,7 +39,12 @@ class RequestContextQueue {
 
   void enqueueScheduledWrite(RequestContext& req) noexcept;
 
-  std::unique_ptr<folly::IOBuf> getNextScheduledWritesBatch() noexcept;
+  // Replaces recordLengths with byte lengths in returned-buffer order, with
+  // SETUP separate from the first request. Their sum equals the buffer length.
+  // An empty queue clears the output. Metadata allocation happens before any
+  // request changes state; allocation failure leaves the queue unchanged.
+  std::unique_ptr<folly::IOBuf> getNextScheduledWritesBatch(
+      std::vector<size_t>* recordLengths = nullptr);
 
   template <typename F>
   void markNextSendingBatchAsSent(F&& foreachRequest) noexcept {

@@ -193,6 +193,8 @@ void Cpp2Worker::plaintextConnectionReady(
     folly::AsyncSocket::UniquePtr sock,
     const folly::SocketAddress& clientAddr,
     wangle::TransportInfo& tinfo) {
+  // URMA retains this TCP socket for negotiation and connection shutdown.
+  sock->setShutdownSocketSet(server_->wShutdownSocketSet_);
 #ifdef FOLLY_HAVE_URMA
   if (server_->getUseUrma()) {
     VLOG(1) << "Cpp2Worker: accepting URMA transport on "
@@ -205,7 +207,6 @@ void Cpp2Worker::plaintextConnectionReady(
     return;
   }
 #endif
-  sock->setShutdownSocketSet(server_->wShutdownSocketSet_);
   new CheckTLSPeekingManager(
       shared_from_this(),
       clientAddr,

@@ -22,10 +22,12 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+#include <folly/ScopeGuard.h>
+#include <folly/portability/GTest.h>
+#include <folly/synchronization/Baton.h>
 
 #include <event2/event.h>
 #include <event2/event_struct.h>
-#include <gtest/gtest.h>
 
 namespace apache {
 namespace thrift {
@@ -49,7 +51,9 @@ class RescueTimer {
  public:
   RescueTimer(folly::EventBase& evb, bool internal = false) : evb_(evb) {
     event_.reset(event_new(
-        evb.getLibeventBase(), -1, 0,
+        evb.getLibeventBase(),
+        -1,
+        0,
         [](evutil_socket_t, short, void* arg) {
           auto& self = *static_cast<RescueTimer*>(arg);
           self.fired = true;
@@ -61,7 +65,7 @@ class RescueTimer {
       throw std::runtime_error("could not create rescue timer");
     }
     if (internal) {
-      event_->ev_evcallback.evcb_flags |= EVLIST_INTERNAL;
+      folly::event_ref_flags(event_.get()) |= EVLIST_INTERNAL;
     }
     timeval timeout{1, 0};
     if (event_add(event_.get(), &timeout) != 0) {
@@ -80,14 +84,17 @@ void checkFlushOrdering(bool enabled) {
   std::vector<int> order;
   bool flushBeforeRescue = false;
   RescueTimer rescue(evb);
-  Queue queue(evb, Consumer{[&](int value) {
-                order.push_back(value);
-                evb.runInLoop([&] {
-                  flushBeforeRescue = !rescue.fired;
-                  order.push_back(2);
-                  evb.terminateLoopSoon();
-                });
-              }}, enabled);
+  Queue queue(
+      evb,
+      Consumer{[&](int value) {
+        order.push_back(value);
+        evb.runInLoop([&] {
+          flushBeforeRescue = !rescue.fired;
+          order.push_back(2);
+          evb.terminateLoopSoon();
+        });
+      }},
+      enabled);
   queue.startConsumingInternal(&evb);
   prime(evb);
   std::thread producer([&] {
@@ -110,30 +117,6 @@ TEST(ReplyQueueBackendYield, DisabledReproducesUnrelatedEventDependency) {
   checkFlushOrdering(false);
 }
 
-TEST(ReplyQueueBackendYield, SeparateBatchesRearmWithoutStoppingEventBase) {
-  folly::EventBase evb;
-  RescueTimer rescue(evb);
-  std::vector<int> consumed;
-  Queue queue(evb, Consumer{[&](int value) {
-                consumed.push_back(value);
-                if (consumed.size() == 2) {
-                  evb.runInLoop([&] { evb.terminateLoopSoon(); });
-                }
-              }}, true);
-  queue.startConsumingInternal(&evb);
-  prime(evb);
-  std::thread producer([&] {
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    queue.putMessage(1);
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    queue.putMessage(2);
-  });
-  evb.loopForever();
-  producer.join();
-  EXPECT_FALSE(rescue.fired);
-  EXPECT_EQ(consumed, (std::vector<int>{1, 2}));
-}
-
 TEST(ReplyQueueBackendYield, ConcurrentProducersAndBoundedBatches) {
   folly::EventBase evb;
   RescueTimer rescue(evb);
@@ -141,14 +124,17 @@ TEST(ReplyQueueBackendYield, ConcurrentProducersAndBoundedBatches) {
   constexpr int kPerProducer = 500;
   std::vector<int> seen(kProducers * kPerProducer);
   int flushed = 0;
-  Queue queue(evb, Consumer{[&](int value) {
-                ++seen.at(value);
-                evb.runInLoop([&] {
-                  if (++flushed == kProducers * kPerProducer) {
-                    evb.terminateLoopSoon();
-                  }
-                });
-              }}, true);
+  Queue queue(
+      evb,
+      Consumer{[&](int value) {
+        ++seen.at(value);
+        evb.runInLoop([&] {
+          if (++flushed == kProducers * kPerProducer) {
+            evb.terminateLoopSoon();
+          }
+        });
+      }},
+      true);
   queue.setMaxReadAtOnce(32);
   queue.startConsumingInternal(&evb);
   prime(evb);
@@ -183,8 +169,7 @@ TEST(ReplyQueueBackendYield, QueuedBeforeStartAndRepeatedStopStart) {
       queue.putMessage(i);
     }
     queue.startConsumingInternal(&evb);
-    for (int spin = 0; spin < 1000 && consumed < (round + 1) * 100;
-         ++spin) {
+    for (int spin = 0; spin < 1000 && consumed < (round + 1) * 100; ++spin) {
       evb.loopOnce(EVLOOP_NONBLOCK);
     }
     EXPECT_EQ(consumed, (round + 1) * 100);
@@ -209,13 +194,16 @@ TEST(ReplyQueueBackendYield, DeferredDestructionCancelsRearm) {
   RescueTimer rescue(evb);
   int consumed = 0;
   std::unique_ptr<Queue::Base> queue;
-  queue = std::make_unique<Queue>(evb, Consumer{[&](int) {
-    ++consumed;
-    evb.runInLoop([&] {
-      queue.reset();
-      evb.terminateLoopSoon();
-    });
-  }}, true);
+  queue = std::make_unique<Queue>(
+      evb,
+      Consumer{[&](int) {
+        ++consumed;
+        evb.runInLoop([&] {
+          queue.reset();
+          evb.terminateLoopSoon();
+        });
+      }},
+      true);
   queue->startConsumingInternal(&evb);
   prime(evb);
   queue->putMessage(1);
@@ -232,7 +220,9 @@ TEST(ReplyQueueBackendYield, DeferredDestructionCancelsRearm) {
 class CountingBackend : public folly::EventBaseBackendBase {
  public:
   explicit CountingBackend(bool opaque) : opaque_(opaque) {}
-  event_base* getEventBase() override { return opaque_ ? nullptr : base_.get(); }
+  event_base* getEventBase() override {
+    return opaque_ ? nullptr : base_.get();
+  }
   int eb_event_base_loop(int flags) override {
     return event_base_loop(base_.get(), flags);
   }
@@ -266,6 +256,53 @@ class CountingBackend : public folly::EventBaseBackendBase {
   std::unique_ptr<event_base, decltype(&event_base_free)> base_{
       event_base_new(), event_base_free};
 };
+
+TEST(ReplyQueueBackendYield, SeparateBatchesRearmWithoutStoppingEventBase) {
+  CountingBackend* backend = nullptr;
+  folly::EventBase::Options options;
+  options.setBackendFactory([&] {
+    auto result = std::make_unique<CountingBackend>(false);
+    backend = result.get();
+    return result;
+  });
+  folly::EventBase evb(options);
+  RescueTimer rescue(evb);
+  std::vector<int> consumed;
+  folly::Baton<> firstRearmed;
+  std::vector<int> breaksAtDelivery;
+  Queue queue(
+      evb,
+      Consumer{[&](int value) {
+        consumed.push_back(value);
+        breaksAtDelivery.push_back(backend->breaks);
+        if (value == 1) {
+          // execute() schedules its rearm callback after the consumer.
+          // A callback in the following iteration runs after rearming.
+          evb.runInLoop([&] { evb.runInLoop([&] { firstRearmed.post(); }); });
+        } else {
+          evb.runInLoop([&] { evb.terminateLoopSoon(); });
+        }
+      }},
+      true);
+  queue.startConsumingInternal(&evb);
+  prime(evb);
+  std::thread producer([&] {
+    queue.putMessage(1);
+    if (firstRearmed.try_wait_for(std::chrono::seconds(2))) {
+      queue.putMessage(2);
+    }
+  });
+  auto join = folly::makeGuard([&] { producer.join(); });
+  evb.loopForever();
+  producer.join();
+  join.dismiss();
+  EXPECT_FALSE(rescue.fired);
+  EXPECT_EQ(consumed, (std::vector<int>{1, 2}));
+  ASSERT_EQ(breaksAtDelivery.size(), 2);
+  // Only a backend notification yields the queue's libevent loop. Observing
+  // a yield between deliveries proves these were two separately armed batches.
+  EXPECT_EQ(breaksAtDelivery[1], breaksAtDelivery[0] + 1);
+}
 
 TEST(ReplyQueueBackendYield, ManualExecuteAndDrainDoNotBreakBackend) {
   CountingBackend* backend = nullptr;

@@ -434,12 +434,12 @@ void ThriftServer::prepareUrma() {
     throw std::invalid_argument(
         "URMA does not support io_uring sockets, duplex servers or custom acceptors");
   }
-  // The upstream global "disabled" flag bypasses the default REQUIRED policy
-  // in CheckTLSPeekingManager. Honor that default, but never an explicit TLS
-  // requirement or configured credentials on this plaintext-only transport.
+  // The constructor leaves sslPolicy_ at REQUIRED when the global flag is
+  // "disabled". Allow that untouched default for this plaintext transport,
+  // but reject an explicit TLS requirement or configured credentials.
   if ((sslPolicy_ == SSLPolicy::REQUIRED &&
        (sslPolicyExplicit_ || FLAGS_thrift_ssl_policy != "disabled")) ||
-      strictSSL_ || sslContextObserver_) {
+      sslContextObserver_) {
     throw std::invalid_argument("The basic URMA transport does not support TLS");
   }
   if (urmaConfig_.dev_name.empty()) {

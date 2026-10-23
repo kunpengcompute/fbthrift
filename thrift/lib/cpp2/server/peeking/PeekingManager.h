@@ -19,6 +19,9 @@
 #include <folly/ExceptionString.h>
 #include <folly/io/Cursor.h>
 #include <folly/io/async/DecoratedAsyncTransportWrapper.h>
+#ifdef FOLLY_HAVE_URMA
+#include <folly/io/async/urma/UrmaRecordWriter.h>
+#endif
 #include <thrift/lib/cpp/server/TServerObserver.h>
 #include <thrift/lib/cpp2/server/Cpp2Worker.h>
 #include <thrift/lib/cpp2/server/peeking/TLSHelper.h>
@@ -166,11 +169,34 @@ class CheckTLSPeekingManager : public PeekingManagerBase,
  */
 class PreReceivedDataAsyncTransportWrapper
     : public folly::DecoratedAsyncTransportWrapper<folly::AsyncTransport>,
+#ifdef FOLLY_HAVE_URMA
+      public folly::UrmaRecordWriter,
+#endif
       public folly::AsyncTransport::ReadCallback {
   using Base = folly::DecoratedAsyncTransportWrapper<folly::AsyncTransport>;
 
  public:
   using UniquePtr = std::unique_ptr<AsyncTransport, Destructor>;
+#ifdef FOLLY_HAVE_URMA
+  bool supportsUrmaRecords() const override {
+    auto* writer = dynamic_cast<const folly::UrmaRecordWriter*>(transport_.get());
+    return writer && writer->supportsUrmaRecords();
+  }
+  void writeChainWithRecords(
+      folly::AsyncTransport::WriteCallback* callback,
+      std::unique_ptr<folly::IOBuf>&& data,
+      std::vector<size_t> lengths,
+      folly::WriteFlags flags = folly::WriteFlags::NONE) noexcept override {
+    // This wrapper only replays reads; its write path is transparent.
+    auto* writer = dynamic_cast<folly::UrmaRecordWriter*>(transport_.get());
+    if (writer && writer->supportsUrmaRecords()) {
+      writer->writeChainWithRecords(
+          callback, std::move(data), std::move(lengths), flags);
+    } else {
+      transport_->writeChain(callback, std::move(data), flags);
+    }
+  }
+#endif
 
   static UniquePtr create(
       folly::AsyncTransport::UniquePtr socket,

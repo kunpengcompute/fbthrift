@@ -24,6 +24,7 @@
 #include <folly/io/async/EventBaseManager.h>
 #include <thrift/lib/cpp/transport/TTransportException.h>
 #include <wangle/channel/Handler.h>
+#include <thrift/lib/cpp2/async/UrmaWriteBatch.h>
 
 namespace apache {
 namespace thrift {
@@ -33,8 +34,9 @@ class TAsyncTransportHandler : public wangle::BytesToBytesHandler,
                                public folly::AsyncTransport::ReadCallback {
  public:
   explicit TAsyncTransportHandler(
-      std::shared_ptr<folly::AsyncTransport> transport)
-      : transport_(std::move(transport)) {}
+      std::shared_ptr<folly::AsyncTransport> transport,
+      std::shared_ptr<detail::UrmaWriteBatchState> batchState = nullptr)
+      : transport_(std::move(transport)), batchState_(std::move(batchState)) {}
 
   TAsyncTransportHandler(TAsyncTransportHandler&&) = default;
 
@@ -89,7 +91,13 @@ class TAsyncTransportHandler : public wangle::BytesToBytesHandler,
 
     auto cb = new WriteCallback();
     auto future = cb->promise_.getFuture();
-    transport_->writeChain(cb, std::move(buf), ctx->getWriteFlags());
+    if (batchState_) {
+      detail::writeWithUrmaRecords(
+          transport_.get(), cb, std::move(buf),
+          std::exchange(batchState_->flushing, {}), ctx->getWriteFlags());
+    } else {
+      transport_->writeChain(cb, std::move(buf), ctx->getWriteFlags());
+    }
     return future;
   }
 
@@ -168,6 +176,7 @@ class TAsyncTransportHandler : public wangle::BytesToBytesHandler,
 
   folly::IOBufQueue bufQueue_{folly::IOBufQueue::cacheChainLength()};
   std::shared_ptr<folly::AsyncTransport> transport_;
+  std::shared_ptr<detail::UrmaWriteBatchState> batchState_;
 };
 
 } // namespace thrift

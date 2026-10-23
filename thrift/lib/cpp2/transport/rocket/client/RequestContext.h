@@ -165,6 +165,8 @@ class RequestContext {
   RequestContextQueue& queue_;
   folly::SafeIntrusiveListHook queueHook_;
   std::unique_ptr<folly::IOBuf> serializedFrame_;
+  // SETUP is prepended to the first request, but remains a separate record.
+  size_t setupFrameLength_{0};
   ssize_t endOffsetInBatch_{};
   StreamId streamId_;
   FrameType frameType_;
@@ -192,6 +194,7 @@ class RequestContext {
       Serializer writer;
       std::move(*setupFrame).serialize(writer);
       auto setupBuffer = std::move(writer).move();
+      setupFrameLength_ = setupBuffer->computeChainDataLength();
       setupBuffer->prependChain(std::move(serializedFrame_));
       serializedFrame_ = std::move(setupBuffer);
     }

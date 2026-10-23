@@ -1,10 +1,12 @@
-/* Copyright (c) Huawei Technologies Co., Ltd. 2026. Licensed under Apache-2.0. */
+/* Copyright (c) Huawei Technologies Co., Ltd. 2026. Licensed under Apache-2.0.
+ */
 #include <thrift/lib/cpp2/server/detail/UrmaServerRuntime.h>
 
 #ifdef FOLLY_HAVE_URMA
 #include <mutex>
 #include <stdexcept>
 #include <utility>
+#include <folly/Conv.h>
 #include <folly/Indestructible.h>
 #include <folly/ScopeGuard.h>
 #include <folly/io/async/urma/UrmaAsyncSocket.h>
@@ -24,11 +26,38 @@ RuntimeState& state() {
   return *value;
 }
 
-bool sameConfig(const folly::UrmaConfig& a, const folly::UrmaConfig& b) {
-  return a.dev_name == b.dev_name && a.rx_depth == b.rx_depth &&
-      a.tx_depth == b.tx_depth && a.buffer_size == b.buffer_size &&
-      a.handshake_timeout_ms == b.handshake_timeout_ms &&
-      a.max_pending_bytes == b.max_pending_bytes;
+void requireSameConfig(
+    const folly::UrmaConfig& existing,
+    const folly::UrmaConfig& requested,
+    const char* context) {
+  auto check =
+      [&](const char* field, const auto& current, const auto& desired) {
+        if (current != desired) {
+          throw std::invalid_argument(folly::to<std::string>(
+              context,
+              ": ",
+              field,
+              " (existing=",
+              current,
+              ", requested=",
+              desired,
+              ")"));
+        }
+      };
+  check("dev_name", existing.dev_name, requested.dev_name);
+  check("rx_depth", existing.rx_depth, requested.rx_depth);
+  check("tx_depth", existing.tx_depth, requested.tx_depth);
+  check("buffer_size", existing.buffer_size, requested.buffer_size);
+  check("enable_read", existing.enable_read, requested.enable_read);
+  check("read_threshold", existing.read_threshold, requested.read_threshold);
+  check(
+      "handshake_timeout_ms",
+      existing.handshake_timeout_ms,
+      requested.handshake_timeout_ms);
+  check(
+      "max_pending_bytes",
+      existing.max_pending_bytes,
+      requested.max_pending_bytes);
 }
 
 struct RuntimeOwner {
@@ -53,8 +82,10 @@ class ServerUrmaSocket final : private RuntimeOwner,
 UrmaServerRuntime::UrmaServerRuntime(const folly::UrmaConfig& config) {
   auto& shared = state();
   std::lock_guard<std::mutex> lock(shared.mutex);
-  if (shared.users && !sameConfig(shared.requested, config)) {
-    throw std::invalid_argument(
+  if (shared.users) {
+    requireSameConfig(
+        shared.requested,
+        config,
         "URMA servers in one process must use the same configuration");
   }
   bool initializedHere = false;
@@ -82,9 +113,10 @@ UrmaServerRuntime::UrmaServerRuntime(const folly::UrmaConfig& config) {
   }
   contextAcquired = true;
   // Pin a borrowed context before reading its effective configuration.
-  if (!shared.users && !shared.owned &&
-      !sameConfig(folly::UrmaInit::getConfig(), config)) {
-    throw std::invalid_argument(
+  if (!shared.users && !shared.owned) {
+    requireSameConfig(
+        folly::UrmaInit::getConfig(),
+        config,
         "ThriftServer URMA config differs from the existing Folly context");
   }
   ++shared.users;

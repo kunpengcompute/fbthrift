@@ -119,6 +119,15 @@ void expectConfigurationConflicts(
       &folly::UrmaConfig::max_pending_bytes,
       "max_pending_bytes",
       existing.max_pending_bytes + 1);
+  auto differentPool = existing;
+  differentPool.registered_pool.max_bytes += 4096;
+  try {
+    auto runtime = std::make_shared<detail::UrmaServerRuntime>(differentPool);
+    FAIL() << "Expected different registered-memory budgets to be rejected";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_EQ(std::string(error.what()), folly::to<std::string>(
+        context, ": registered_pool configuration differs"));
+  }
   // Rejected attempts must leave the shared user count and borrowed context
   // usable, including after the acquireContext()/rollback path.
   auto compatible = std::make_shared<detail::UrmaServerRuntime>(existing);

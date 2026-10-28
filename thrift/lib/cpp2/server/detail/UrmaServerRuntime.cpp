@@ -58,6 +58,10 @@ void requireSameConfig(
       "max_pending_bytes",
       existing.max_pending_bytes,
       requested.max_pending_bytes);
+  if (existing.registered_pool != requested.registered_pool) {
+    throw std::invalid_argument(folly::to<std::string>(
+        context, ": registered_pool configuration differs"));
+  }
 }
 
 struct RuntimeOwner {

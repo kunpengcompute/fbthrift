@@ -34,6 +34,7 @@
 #include <folly/io/SocketOptionMap.h>
 #include <folly/io/async/AsyncSocket.h>
 #include <folly/io/async/AsyncTransport.h>
+#include <thrift/lib/cpp2/async/UrmaWriteBatch.h>
 #include <folly/io/async/DelayedDestruction.h>
 #include <folly/io/async/EventBase.h>
 #include <folly/net/NetOps.h>
@@ -329,6 +330,8 @@ class RocketServerConnection final
   folly::EventBase& evb_;
   folly::AsyncTransport::UniquePtr socket_;
   folly::AsyncSocket* const rawSocket_;
+  // The transport whose egress data is observed (URMA or the TCP data socket).
+  folly::AsyncTransport* egressTransport_{nullptr};
 
   Parser<RocketServerConnection> parser_{*this};
   std::unique_ptr<RocketServerHandler> frameHandler_;
@@ -348,6 +351,7 @@ class RocketServerConnection final
 
   // Context for each inflight write to the underlying transport.
   struct WriteBatchContext {
+    std::vector<size_t> recordLengths;
     // the counts of completed requests in each inflight write
     size_t requestCompleteCount{0};
     // the counts of valid sendCallbacks in each inflight write
@@ -422,6 +426,8 @@ class RocketServerConnection final
         }
         totalBytesBuffered_ += totalBytesInWrite;
       }
+      if (::apache::thrift::detail::usesUrmaRecords(connection_.socket_.get()))
+        bufferedWritesContext_.recordLengths.push_back(data->computeChainDataLength());
       if (!bufferedWrites_) {
         bufferedWrites_ = std::move(data);
         if (batchingInterval_ != std::chrono::milliseconds::zero()) {

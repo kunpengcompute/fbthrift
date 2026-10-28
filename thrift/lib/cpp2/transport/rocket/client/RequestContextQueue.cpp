@@ -16,6 +16,7 @@
 
 #include <thrift/lib/cpp2/transport/rocket/client/RequestContextQueue.h>
 
+#include <stdexcept>
 #include <utility>
 
 #include <folly/Likely.h>
@@ -36,10 +37,24 @@ void RequestContextQueue::enqueueScheduledWrite(RequestContext& req) noexcept {
   trackIfRequestResponse(req);
 }
 
-std::unique_ptr<folly::IOBuf>
-RequestContextQueue::getNextScheduledWritesBatch() noexcept {
+std::unique_ptr<folly::IOBuf> RequestContextQueue::getNextScheduledWritesBatch(
+    std::vector<size_t>* recordLengths) {
   std::unique_ptr<folly::IOBuf> batchBuf;
   size_t endOffset = 0;
+  if (recordLengths) {
+    recordLengths->clear();
+    // Once requests are moved to WRITE_SENDING, their buffers and completion
+    // bookkeeping must not be interrupted by a metadata allocation failure.
+    size_t records = 0;
+    for (const auto& req : writeScheduledQueue_) {
+      const size_t additional = req.setupFrameLength_ ? 2 : 1;
+      if (records > recordLengths->max_size() - additional) {
+        throw std::length_error("too many URMA records in a write batch");
+      }
+      records += additional;
+    }
+    recordLengths->reserve(records);
+  }
 
   while (!writeScheduledQueue_.empty()) {
     auto& req = writeScheduledQueue_.front();
@@ -57,7 +72,14 @@ RequestContextQueue::getNextScheduledWritesBatch() noexcept {
     }
 
     auto reqBuf = req.serializedChain();
-    endOffset += reqBuf->computeChainDataLength();
+    const auto length = reqBuf->computeChainDataLength();
+    if (recordLengths) {
+      if (req.setupFrameLength_) {
+        recordLengths->push_back(req.setupFrameLength_);
+      }
+      recordLengths->push_back(length - req.setupFrameLength_);
+    }
+    endOffset += length;
     req.setEndOffsetInBatch(endOffset);
     if (!batchBuf) {
       batchBuf = std::move(reqBuf);

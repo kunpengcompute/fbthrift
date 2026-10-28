@@ -55,19 +55,7 @@ class IOWorkerContext {
    *
    * @param eventBase EventBase to attach the queue.
    */
-  void init(folly::EventBase& eventBase) {
-    eventBase_ = &eventBase;
-    replyQueue_ = std::make_unique<ReplyQueue>(ReplyInfoConsumer());
-    replyQueue_->setMaxReadAtOnce(0);
-    eventBase.runInEventBaseThread(
-        [queue = replyQueue_.get(), &evb = eventBase, alive = alive_] {
-          auto aliveLocked = alive->rlock();
-          if (*aliveLocked) {
-            // IOWorkerContext is still alive and so is replyQueue_
-            queue->startConsumingInternal(&evb);
-          }
-        });
-  }
+  void init(folly::EventBase& eventBase);
 
   virtual ~IOWorkerContext() {
     *(alive_->wlock()) = false;

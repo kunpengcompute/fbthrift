@@ -35,6 +35,9 @@
 #include <folly/io/SocketOptionMap.h>
 #include <folly/io/async/AsyncTransport.h>
 #include <folly/io/async/DelayedDestruction.h>
+#ifdef FOLLY_HAVE_URMA
+#include <folly/io/async/urma/UrmaAsyncSocket.h>
+#endif
 
 #include <wangle/acceptor/ConnectionManager.h>
 
@@ -54,6 +57,26 @@ THRIFT_FLAG_DEFINE_bool(enable_rocket_connection_observers, false);
 namespace apache {
 namespace thrift {
 namespace rocket {
+
+namespace {
+folly::AsyncTransport* bindEgressBufferCallback(
+    folly::AsyncTransport* transport,
+    folly::AsyncTransport::BufferCallback* callback) {
+  if (!transport)
+    return nullptr;
+#ifdef FOLLY_HAVE_URMA
+  if (auto* urma = transport->getUnderlyingTransport<folly::UrmaAsyncSocket>()) {
+    urma->setBufferCallback(callback);
+    return urma;
+  }
+#endif
+  if (auto* tcp = transport->getUnderlyingTransport<folly::AsyncSocket>()) {
+    tcp->setBufferCallback(callback);
+    return tcp;
+  }
+  return nullptr;
+}
+} // namespace
 
 constexpr std::chrono::seconds RocketServerConnection::SocketDrainer::kTimeout;
 
@@ -87,10 +110,9 @@ RocketServerConnection::RocketServerConnection(
   CHECK(socket_);
   CHECK(frameHandler_);
   socket_->setReadCB(&parser_);
+  socket_->setSendTimeout(cfg.socketWriteTimeout.count());
+  egressTransport_ = bindEgressBufferCallback(socket_.get(), this);
   if (rawSocket_) {
-    rawSocket_->setBufferCallback(this);
-    rawSocket_->setSendTimeout(cfg.socketWriteTimeout.count());
-
     if (cfg.socketOptions != nullptr) {
       auto sockfd = rawSocket_->getNetworkSocket();
       for (auto& [option, value] : *cfg.socketOptions) {
@@ -161,8 +183,10 @@ void RocketServerConnection::flushWrites(
     }
   }
 
+  auto recordLengths = std::move(context.recordLengths);
   inflightWritesQueue_.push_back(std::move(context));
-  socket_->writeChain(this, std::move(writes));
+  ::apache::thrift::detail::writeWithUrmaRecords(
+      socket_.get(), this, std::move(writes), std::move(recordLengths));
 }
 
 void RocketServerConnection::send(
@@ -184,9 +208,7 @@ RocketServerConnection::~RocketServerConnection() {
   DCHECK(inflightSinkFinalResponses_ == 0);
   DCHECK(writeBatcher_.empty());
   DCHECK(activePausedHandlers_ == 0);
-  if (rawSocket_) {
-    rawSocket_->setBufferCallback(nullptr);
-  }
+  bindEgressBufferCallback(egressTransport_, nullptr);
 
   // Subtle: Close the socket, which will fail all outstanding writes and
   // unsubscribe the read callback, but do not destroy the object itself, since
@@ -798,7 +820,7 @@ void RocketServerConnection::writeErr(
 }
 
 void RocketServerConnection::onEgressBuffered() {
-  const auto buffered = rawSocket_->getAllocatedBytesBuffered();
+  const auto buffered = egressTransport_->getAllocatedBytesBuffered();
   const auto oldBuffered = egressBufferSize_;
   egressBufferSize_ = buffered;
   // track egress memory consumption, drop connection if necessary
@@ -810,12 +832,12 @@ void RocketServerConnection::onEgressBuffered() {
     const auto delta = buffered - oldBuffered;
     const auto exceeds = !egressMemoryTracker_.increment(delta);
     DVLOG(10) << fmt::format("buffered: {} (+{}) B", buffered, delta);
-    if (exceeds && rawSocket_->good()) {
+    if (exceeds && socket_->good()) {
       DestructorGuard dg(this);
       FB_LOG_EVERY_MS(ERROR, 1000) << fmt::format(
           "Dropping connection: exceeded egress memory limit ({})",
           getPeerAddress().describe());
-      rawSocket_->closeNow(); // triggers writeErr() events now
+      socket_->closeNow(); // triggers writeErr() events now
       return;
     }
   }

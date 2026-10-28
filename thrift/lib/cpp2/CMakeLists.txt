@@ -304,7 +304,9 @@ add_library(
   server/ServerInstrumentation.cpp
   server/ServiceHealthPoller.cpp
   server/ThriftProcessor.cpp
+  server/IOWorkerContext.cpp
   server/ThriftServer.cpp
+  server/detail/UrmaServerRuntime.cpp
   server/ThriftServerConfig.cpp
   server/peeking/TLSHelper.cpp
   transport/core/RpcMetadataUtil.cpp
@@ -397,3 +399,51 @@ install(
   EXPORT fbthrift-exports
   DESTINATION ${LIB_INSTALL_DIR}
 )
+
+if(enable_tests)
+  add_executable(UrmaWriteBatchTest-t async/test/UrmaWriteBatchTest.cpp)
+  target_link_libraries(UrmaWriteBatchTest-t
+    thriftcpp2 ${GTEST_BOTH_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT}
+  )
+  add_test(NAME UrmaWriteBatchTest COMMAND UrmaWriteBatchTest-t)
+  set_tests_properties(UrmaWriteBatchTest PROPERTIES TIMEOUT 30)
+
+  add_executable(UrmaRecordAllocationTest-t
+    transport/rocket/test/UrmaRecordAllocationTest.cpp
+  )
+  target_link_libraries(UrmaRecordAllocationTest-t thriftcpp2)
+  add_test(NAME UrmaRecordAllocationTest COMMAND UrmaRecordAllocationTest-t)
+  set_tests_properties(UrmaRecordAllocationTest PROPERTIES TIMEOUT 30)
+
+  add_executable(UrmaEgressTest-t transport/rocket/test/UrmaEgressTest.cpp)
+  target_link_libraries(UrmaEgressTest-t
+    thriftcpp2 ${GTEST_BOTH_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT}
+  )
+  add_test(NAME UrmaEgressTest COMMAND UrmaEgressTest-t)
+  set_tests_properties(UrmaEgressTest PROPERTIES TIMEOUT 30)
+
+  add_executable(UrmaRequestRecordsTest-t
+    transport/rocket/test/RequestContextQueueTest.cpp
+  )
+  target_link_libraries(UrmaRequestRecordsTest-t
+    thriftcpp2 ${GTEST_BOTH_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT}
+  )
+  add_test(NAME UrmaRequestRecordsTest COMMAND UrmaRequestRecordsTest-t)
+  set_tests_properties(UrmaRequestRecordsTest PROPERTIES TIMEOUT 30)
+
+  add_executable(UrmaServerTest-t server/test/UrmaServerTest.cpp)
+  target_link_libraries(UrmaServerTest-t
+    thriftcpp2 ${GTEST_BOTH_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT}
+  )
+  add_test(NAME UrmaServerTest COMMAND UrmaServerTest-t)
+  set_tests_properties(UrmaServerTest PROPERTIES TIMEOUT 60)
+
+  add_executable(ReplyQueueBackendYieldTest-t
+    server/test/ReplyQueueBackendYieldTest.cpp
+  )
+  target_link_libraries(ReplyQueueBackendYieldTest-t
+    Folly::folly ${GTEST_BOTH_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT}
+  )
+  add_test(NAME ReplyQueueBackendYieldTest COMMAND ReplyQueueBackendYieldTest-t)
+  set_tests_properties(ReplyQueueBackendYieldTest PROPERTIES TIMEOUT 30)
+endif()

@@ -34,6 +34,7 @@
 #include <thrift/lib/cpp2/server/Cpp2Connection.h>
 #include <thrift/lib/cpp2/server/LoggingEvent.h>
 #include <thrift/lib/cpp2/server/ThriftServer.h>
+#include <thrift/lib/cpp2/server/detail/UrmaServerRuntime.h>
 #include <thrift/lib/cpp2/server/peeking/PeekingManager.h>
 #include <thrift/lib/thrift/gen-cpp2/RpcMetadata_types.h>
 #include <wangle/acceptor/EvbHandshakeHelper.h>
@@ -192,7 +193,20 @@ void Cpp2Worker::plaintextConnectionReady(
     folly::AsyncSocket::UniquePtr sock,
     const folly::SocketAddress& clientAddr,
     wangle::TransportInfo& tinfo) {
+  // URMA retains this TCP socket for negotiation and connection shutdown.
   sock->setShutdownSocketSet(server_->wShutdownSocketSet_);
+#ifdef FOLLY_HAVE_URMA
+  if (server_->getUseUrma()) {
+    VLOG(1) << "Cpp2Worker: accepting URMA transport on "
+            << server_->getUrmaConfig().dev_name;
+    auto transport = detail::makeUrmaServerTransport(
+        std::move(sock), server_->urmaRuntime_);
+    onNewConnection(
+        std::move(transport), &clientAddr, "",
+        wangle::SecureTransportType::NONE, tinfo);
+    return;
+  }
+#endif
   new CheckTLSPeekingManager(
       shared_from_this(),
       clientAddr,

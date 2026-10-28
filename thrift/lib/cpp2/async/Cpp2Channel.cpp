@@ -40,8 +40,14 @@ Cpp2Channel::Cpp2Channel(
       outputBufferingHandler_(
           std::make_shared<wangle::OutputBufferingHandler>()),
       framingHandler_(std::move(framingHandler)) {
+  std::shared_ptr<detail::UrmaWriteBatchState> batchState;
+  if (detail::usesUrmaRecords(transport.get())) {
+    batchState = std::make_shared<detail::UrmaWriteBatchState>();
+    outputBufferingHandler_ =
+        std::make_shared<detail::UrmaOutputBufferingHandler>(batchState);
+  }
   pipeline_ = Pipeline::create(
-      TAsyncTransportHandler(transport),
+      TAsyncTransportHandler(transport, std::move(batchState)),
       outputBufferingHandler_,
       framingHandler_,
       this);

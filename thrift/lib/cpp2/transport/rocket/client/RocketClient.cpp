@@ -15,6 +15,9 @@
  */
 
 #include <thrift/lib/cpp2/transport/rocket/client/RocketClient.h>
+#include <thrift/lib/cpp2/async/UrmaWriteBatch.h>
+
+#include <exception>
 
 #include <chrono>
 #include <functional>
@@ -1158,10 +1161,23 @@ void RocketClient::writeScheduledRequestsToSocket() noexcept {
   DestructorGuard dg(this);
 
   if (clientState_.connState == ConnectionState::CONNECTED) {
-    auto buf = queue_.getNextScheduledWritesBatch();
+    std::vector<size_t> recordLengths;
+    std::unique_ptr<folly::IOBuf> buf;
+    try {
+      buf = queue_.getNextScheduledWritesBatch(
+          ::apache::thrift::detail::usesUrmaRecords(socket_.get())
+              ? &recordLengths
+              : nullptr);
+    } catch (...) {
+      // The batch is still scheduled, so the normal close path can fail every
+      // request exactly once. Do not let bad_alloc escape this noexcept loop.
+      close(folly::exception_wrapper(std::current_exception()));
+      return;
+    }
 
     if (buf) {
-      socket_->writeChain(this, std::move(buf), folly::WriteFlags::NONE);
+      ::apache::thrift::detail::writeWithUrmaRecords(
+          socket_.get(), this, std::move(buf), std::move(recordLengths));
     }
   }
 

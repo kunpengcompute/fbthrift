@@ -14,6 +14,14 @@
 
 add_executable(compiler_generate_build_templates build_templates.cc)
 target_link_libraries(compiler_generate_build_templates ${Boost_LIBRARIES})
+if(enable_tests)
+  add_test(
+    NAME compiler_template_line_endings
+    COMMAND ${PYTHON_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/../test/templates_line_endings_test.py
+      --builder $<TARGET_FILE:compiler_generate_build_templates>
+  )
+endif()
 
 file(
   GLOB_RECURSE

@@ -111,6 +111,9 @@ void expectConfigurationConflicts(
       &folly::UrmaConfig::read_threshold,
       "read_threshold",
       existing.read_threshold + 1);
+  check(&folly::UrmaConfig::read_window, "read_window", existing.read_window + 1);
+  check(
+      &folly::UrmaConfig::offer_window, "offer_window", existing.offer_window + 1);
   check(
       &folly::UrmaConfig::handshake_timeout_ms,
       "handshake_timeout_ms",

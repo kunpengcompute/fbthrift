@@ -50,6 +50,8 @@ void requireSameConfig(
   check("buffer_size", existing.buffer_size, requested.buffer_size);
   check("enable_read", existing.enable_read, requested.enable_read);
   check("read_threshold", existing.read_threshold, requested.read_threshold);
+  check("read_window", existing.read_window, requested.read_window);
+  check("offer_window", existing.offer_window, requested.offer_window);
   check(
       "handshake_timeout_ms",
       existing.handshake_timeout_ms,

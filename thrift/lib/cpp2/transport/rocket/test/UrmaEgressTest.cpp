@@ -45,6 +45,7 @@ TEST(UrmaEgress, FrameworkTimeoutAndBufferAccounting) {
   auto* device = std::getenv("FBTHRIFT_URMA_TEST_DEVICE");
   if (!device || !*device) GTEST_SKIP() << "Set FBTHRIFT_URMA_TEST_DEVICE";
   folly::UrmaConfig config;
+  config.registered_pool.enabled = true;
   config.dev_name = device;
   folly::UrmaInit::init(config);
   auto finish = folly::makeGuard([] { folly::UrmaInit::fini(); });
@@ -115,6 +116,7 @@ TEST(UrmaEgress, MemoryLimitClosesTheBusinessTransport) {
   auto* device = std::getenv("FBTHRIFT_URMA_TEST_DEVICE");
   if (!device || !*device) GTEST_SKIP() << "Set FBTHRIFT_URMA_TEST_DEVICE";
   folly::UrmaConfig config;
+  config.registered_pool.enabled = true;
   config.dev_name = device;
   folly::UrmaInit::init(config);
   auto finish = folly::makeGuard([] { folly::UrmaInit::fini(); });
@@ -149,6 +151,7 @@ void testTimeout(bool restart) {
   auto* device = std::getenv("FBTHRIFT_URMA_TEST_DEVICE");
   if (!device || !*device) GTEST_SKIP() << "Set FBTHRIFT_URMA_TEST_DEVICE";
   folly::UrmaConfig config;
+  config.registered_pool.enabled = true;
   config.dev_name = device;
   config.handshake_timeout_ms = 5000;
   folly::UrmaInit::init(config);

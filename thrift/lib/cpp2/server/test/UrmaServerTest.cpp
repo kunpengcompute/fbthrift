@@ -123,8 +123,10 @@ void expectConfigurationConflicts(
       &folly::UrmaConfig::max_pending_bytes,
       "max_pending_bytes",
       existing.max_pending_bytes + 1);
-  check(&folly::UrmaConfig::max_water, "max_water", existing.max_water + 1);
-  check(&folly::UrmaConfig::io_owners, "io_owners", existing.io_owners + 1);
+  check(
+      &folly::UrmaConfig::max_retained_bytes,
+      "max_retained_bytes",
+      existing.max_retained_bytes + 1);
   auto differentPool = existing;
   differentPool.registered_pool.pool_max_size += 4096;
   try {

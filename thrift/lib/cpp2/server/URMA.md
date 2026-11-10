@@ -22,9 +22,7 @@ must request the same configuration. If the application has already initialized
 Folly URMA, pass its effective `UrmaInit::getConfig()`; that context is borrowed
 and remains the application's responsibility to finalize.
 
-The tested Folly `dev_urma` revision is
-[`ac628255f236caa1540ed41c1509c8c2d7009f83`](https://gitcode.com/donghuanan/folly/commit/ac628255f236caa1540ed41c1509c8c2d7009f83).
-Use the matching `dev_urma` implementation, including
+Use the matching Folly implementation with per-connection URMA queues, including
 `UrmaAsyncSocket::newSocket(EventBase*, const SocketAddress&)` and the owning
 `UrmaAsyncSocket(AsyncSocket::UniquePtr)` constructor, `UrmaRecordWriter`,
 `UrmaConfig::enable_read` / `read_threshold`, context acquire/release, and
@@ -34,6 +32,31 @@ revision alone does not provide these APIs. Build Folly with
 existing benchmark against the same headers and libraries. The original
 benchmark service and client source files do not need modification; no
 benchmark-side compatibility patch is needed.
+
+## Receive storage and copy boundaries
+
+The transport's zero-copy body boundary starts at registered serialization
+output and ends at the receiving protocol input. For SEND, an owning IOBuf
+retains the completed receive allocation while the receive slot obtains a
+replacement block. For one-sided READ, the owning IOBuf instead retains the
+separate registered READ destination; the posted receive slot carries the
+PULL/FREE control messages. It is not the READ body destination.
+
+Header's transport handler and Rocket's parser accept these IOBufs by moving
+ownership. Removing framing and reading a binary field into an IOBuf can keep
+the same underlying memory. Clones retain the original allocation until the
+last reference is released, including after socket close or on another thread.
+Deserializing into `std::string` copies the field. Initial protocol detection
+uses a conventional read callback and copies its small prefix. Compression,
+explicit coalescing, pool-external inputs and nonmovable callbacks also lie
+outside the transport body zero-copy guarantee. The Folly
+`copied_read_target_bytes` counter includes conventional receive-callback
+copies for both SEND and READ; it is not specific to READ bodies.
+
+Registered SEND chains that exceed one WR's SGE capacity must be sent in
+ordered prefixes instead of copied for coalescing. Both endpoints must have
+enough SGEs for an independent header plus registered data to meet an all-SEND
+zero-copy requirement. The one-SGE compatibility fallback can copy.
 
 For the existing benchmark, leave `dev_name` empty for TCP; pass
 `--dev_name=udmac0d1e2 --use_io_uring=false` to both endpoints for URMA. The
@@ -65,10 +88,10 @@ With `enable_tests=ON`, build and run the focused tests:
 ```bash
 cmake --build _build --target UrmaServerTest-t UrmaEgressTest-t \
   UrmaRequestRecordsTest-t UrmaRecordAllocationTest-t UrmaWriteBatchTest-t \
-  ReplyQueueBackendYieldTest-t
+  UrmaReceiveStorageTest-t ReplyQueueBackendYieldTest-t
 FBTHRIFT_URMA_TEST_DEVICE=udmac0d1e2 \
   ctest --test-dir _build --output-on-failure \
-  -R 'Urma(Egress|RequestRecords|RecordAllocation|WriteBatch|Server)Test|ReplyQueueBackendYieldTest'
+  -R 'Urma(Egress|RequestRecords|RecordAllocation|WriteBatch|ReceiveStorage|Server)Test|ReplyQueueBackendYieldTest'
 ```
 
 Hardware lifecycle cases require the opt-in environment variable
@@ -76,6 +99,15 @@ Hardware lifecycle cases require the opt-in environment variable
 borrowing an application context, conflicting configurations, bind failure,
 strictSSL without credentials, and shutdown of an accepted negotiation socket.
 Without that variable, hardware cases are explicitly skipped.
+
+`UrmaReceiveStorageTest` observes actual SDK post addresses and completions on
+a local URMA connection. It checks Header and Rocket with READ enabled and
+disabled, compares the received protocol/IOBuf field addresses with the actual
+DMA destination, forces slot replacement while retaining clones, then closes
+the sockets and releases the clones on another thread after finalization.
+It also verifies the separate `std::string` copy boundary. This focused test
+attaches the protocol handlers directly; it does not include initial protocol
+detection, TLS encryption or a complete application RPC service.
 
 Record tests compare exact serialized bytes and boundaries across different
 IOBuf partitions, SETUP plus request, and small/large/small batches. A separate

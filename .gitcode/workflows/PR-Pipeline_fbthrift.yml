@@ -115,8 +115,8 @@ stages:
             with:
               project-name: "boostkit"
 
-      malicious-scan:
-        name: malicious-scan
+      antipoison-scan:
+        name: antipoison-scan
         runs-on: ["ubuntu-latest", "x64", "slim"]
         permissions:
           id-token: write     # 仅本作业需要 OIDC 令牌
@@ -129,7 +129,7 @@ stages:
       build:
         name: build
         if: ${{ jobs.Detect_file_changes.outputs.need_build == 'yes' }}
-        needs: [ Detect_file_changes, sca-pr, malicious-scan ]
+        needs: [ Detect_file_changes, sca-pr, antipoison-scan ]
         uses: .gitcode/workflows/build_job.yml
         with:
           runs_on_flavor: "flavor=xlarge"
@@ -141,7 +141,7 @@ stages:
       ut: # 形态①：ut 独立构建，不依赖 build 制品
         name: ut
         if: ${{ jobs.Detect_file_changes.outputs.need_build == 'yes' }}
-        needs: [ Detect_file_changes, sca-pr, malicious-scan ]
+        needs: [ Detect_file_changes, sca-pr, antipoison-scan ]
         uses: .gitcode/workflows/ut_job.yml
         with:
           runs_on_flavor: "flavor=xlarge"

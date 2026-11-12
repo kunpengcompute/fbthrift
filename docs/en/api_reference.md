@@ -1,5 +1,7 @@
 # API Reference
 
+<!-- md-trans-meta sourceCommit=c085ca84d69a0b59b67552ad7e34db264c12bf60 translatedAt=2026-10-21T03:42:58.328Z pushedAt=2026-10-21T03:54:47.055Z -->
+
 ## FbThrift v1.1.0
 
 This chapter describes the ThreadManager task scheduling and Header frame processing interfaces newly added in FbThrift v1.1.0.
@@ -59,7 +61,11 @@ Provides compatible conversion for legacy interfaces such as `removeNextPending(
 const std::shared_ptr<Runnable>& ThreadManager::Task::getRunnable() const;
 ```
 
+<<<<<<< HEAD
 >![Note icon](public_sys-resources/icon-note.gif)**NOTE**
+=======
+>![note](public_sys-resources/icon-note.gif) **NOTE**
+>>>>>>> f6792e90e7... AI亲和优化&修改现网检视&合入更新翻译
 >
 >This interface is a lazy compatibility path and is not part of the regular execution path for regular RPC tasks.
 
@@ -123,7 +129,7 @@ readSize = std::clamp(avgRequestSize_ * 16, size_t(2048), size_t(524288));
 
 The calculated result is used to refresh the Pipeline read buffer setting, with the buffer size limited to the range of 2 KB to 512 KB. In the incomplete-frame scenario, the remaining bytes and the available space at the tail of the queue are also taken into account, reducing repeated reads for large frames while preventing small requests from occupying an excessively large fixed buffer for a long time.
 
-> ![Image indicating a note](public_sys-resources/icon-note.gif) **NOTE**
+> ![note](public_sys-resources/icon-note.gif) **NOTE**
 >
 >The adaptive logic refreshes the buffer settings in the read path. Callers that rely on the fixed buffer semantics of `setReadBufferSize()` should perform regression verification when upgrading to FbThrift v1.1.0.
 
@@ -376,6 +382,6 @@ For types or containers that do not meet the above conditions, the SFINAE mechan
 
 ## Change History
 
-|Release|Date|Description|
+|Version|Date|Description|
 |:---|:---|:---|
 |01|2026-9-30|This is the first official release.|

@@ -61,11 +61,7 @@ Provides compatible conversion for legacy interfaces such as `removeNextPending(
 const std::shared_ptr<Runnable>& ThreadManager::Task::getRunnable() const;
 ```
 
-<<<<<<< HEAD
->![Note icon](public_sys-resources/icon-note.gif)**NOTE**
-=======
 >![note](public_sys-resources/icon-note.gif) **NOTE**
->>>>>>> f6792e90e7... AI亲和优化&修改现网检视&合入更新翻译
 >
 >This interface is a lazy compatibility path and is not part of the regular execution path for regular RPC tasks.
 

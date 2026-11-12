@@ -36,11 +36,7 @@
 |--|--|--|
 |Linux systems such as Debian 12|AArch64 processors such as Kunpeng 920 and Kunpeng 950|Clang 16|
 
-<<<<<<< HEAD
-> ![Note icon](public_sys-resources/icon-note.gif)**NOTE**
-=======
 > ![note](public_sys-resources/icon-note.gif) **NOTE**
->>>>>>> f6792e90e7... AI亲和优化&修改现网检视&合入更新翻译
 >
 > The Binary Protocol optimization does not depend on the SVE2 instruction set and can achieve performance improvements via automatic compiler vectorization on AArch64 and x86-64 platforms. The SVE2 optimization for the Compact Protocol takes effect only on CPUs that support the SVE2 instruction set, automatically falling back to the scalar path when it is not supported.
 

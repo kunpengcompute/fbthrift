@@ -22,7 +22,8 @@ concurrency: # 并发控制（必须用 GitCode 原生语法，GitHub 的 group/
     events: [mr_id]
 
 permissions:
-  repository: read               # 顶层只声明基础读权限；id-token 按需下沉到具体作业
+  repository: read               # 顶层只声明基础读权限
+  pr: read                       # 作业需读取 PR 元数据；id-token 按需下沉到具体作业
 
 env:
   pr_id: ${{ atomgit.event.pull_request.number }}

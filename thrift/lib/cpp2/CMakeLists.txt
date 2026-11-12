@@ -401,6 +401,13 @@ install(
 )
 
 if(enable_tests)
+  add_executable(UrmaReceiveStorageTest-t async/test/UrmaReceiveStorageTest.cpp)
+  target_link_libraries(UrmaReceiveStorageTest-t
+    thriftcpp2 ${GTEST_BOTH_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT} ${CMAKE_DL_LIBS}
+  )
+  add_test(NAME UrmaReceiveStorageTest COMMAND UrmaReceiveStorageTest-t)
+  set_tests_properties(UrmaReceiveStorageTest PROPERTIES TIMEOUT 60)
+
   add_executable(UrmaWriteBatchTest-t async/test/UrmaWriteBatchTest.cpp)
   target_link_libraries(UrmaWriteBatchTest-t
     thriftcpp2 ${GTEST_BOTH_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT}

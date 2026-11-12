@@ -74,6 +74,7 @@ void expectInvalidConfiguration(ThriftServer& server, const char* message) {
 void configurePlaceholderDevice(ThriftServer& server) {
   folly::UrmaConfig config;
   config.dev_name = "fbthrift-configuration-test-device";
+  config.registered_pool.enabled = true;
   server.setUrmaConfig(config);
 }
 
@@ -111,6 +112,9 @@ void expectConfigurationConflicts(
       &folly::UrmaConfig::read_threshold,
       "read_threshold",
       existing.read_threshold + 1);
+  check(&folly::UrmaConfig::read_window, "read_window", existing.read_window + 1);
+  check(
+      &folly::UrmaConfig::offer_window, "offer_window", existing.offer_window + 1);
   check(
       &folly::UrmaConfig::handshake_timeout_ms,
       "handshake_timeout_ms",
@@ -119,6 +123,19 @@ void expectConfigurationConflicts(
       &folly::UrmaConfig::max_pending_bytes,
       "max_pending_bytes",
       existing.max_pending_bytes + 1);
+  check(
+      &folly::UrmaConfig::max_retained_bytes,
+      "max_retained_bytes",
+      existing.max_retained_bytes + 1);
+  auto differentPool = existing;
+  differentPool.registered_pool.pool_max_size += 4096;
+  try {
+    auto runtime = std::make_shared<detail::UrmaServerRuntime>(differentPool);
+    FAIL() << "Expected different registered-memory budgets to be rejected";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_EQ(std::string(error.what()), folly::to<std::string>(
+        context, ": registered_pool configuration differs"));
+  }
   // Rejected attempts must leave the shared user count and borrowed context
   // usable, including after the acquireContext()/rollback path.
   auto compatible = std::make_shared<detail::UrmaServerRuntime>(existing);
@@ -150,6 +167,7 @@ TEST(UrmaServer, InitializationFailureDoesNotLeaveAContext) {
   auto server = makeServer();
   server->setUseUrma(true);
   folly::UrmaConfig config;
+  config.registered_pool.enabled = true;
   config.dev_name = "fbthrift-no-such-urma-device";
   server->setUrmaConfig(config);
   EXPECT_THROW(server->setup(), std::runtime_error);
@@ -162,6 +180,7 @@ TEST(UrmaServerHardware, SharedContextOutlivesTheFirstServer) {
     GTEST_SKIP() << "Set FBTHRIFT_URMA_TEST_DEVICE to run on URMA hardware";
   }
   folly::UrmaConfig config;
+  config.registered_pool.enabled = true;
   config.dev_name = device;
   auto first = makeServer();
   auto second = makeServer();
@@ -184,6 +203,7 @@ TEST(UrmaServerHardware, BorrowsAnApplicationContextWithoutFinalizingIt) {
     GTEST_SKIP() << "Set FBTHRIFT_URMA_TEST_DEVICE to run on URMA hardware";
   }
   folly::UrmaConfig config;
+  config.registered_pool.enabled = true;
   config.dev_name = device;
   folly::UrmaInit::init(config);
   auto cleanup = folly::makeGuard([] { folly::UrmaInit::fini(); });
@@ -204,6 +224,7 @@ TEST(
     GTEST_SKIP() << "Set FBTHRIFT_URMA_TEST_DEVICE to run on URMA hardware";
   }
   folly::UrmaConfig config;
+  config.registered_pool.enabled = true;
   config.dev_name = device;
   auto first = makeServer();
   first->setUseUrma(true);
@@ -241,6 +262,7 @@ TEST(UrmaServerHardware, ReportsConflictsWithoutFinalizingBorrowedContext) {
     GTEST_SKIP() << "Set FBTHRIFT_URMA_TEST_DEVICE to run on URMA hardware";
   }
   folly::UrmaConfig config;
+  config.registered_pool.enabled = true;
   config.dev_name = device;
   folly::UrmaInit::init(config);
   auto cleanup = folly::makeGuard([] { folly::UrmaInit::fini(); });
@@ -265,6 +287,7 @@ TEST(UrmaServerHardware, BindFailureReleasesTheNewContext) {
   urma->setAddress(*occupied.getAddress());
   urma->setUseUrma(true);
   folly::UrmaConfig config;
+  config.registered_pool.enabled = true;
   config.dev_name = device;
   urma->setUrmaConfig(config);
   try {
@@ -285,6 +308,7 @@ TEST(UrmaServerHardware, StrictSslWithoutCredentialsDoesNotEnableTls) {
   }
   auto server = makeServer();
   folly::UrmaConfig config;
+  config.registered_pool.enabled = true;
   config.dev_name = device;
   server->setUrmaConfig(config);
   server->setUseUrma(true);
@@ -307,6 +331,7 @@ TEST(UrmaServerHardware, ShutdownSetClosesAnAcceptedUrmaHandshakeSocket) {
   auto server = makeServer();
   server->replaceShutdownSocketSet(sockets);
   folly::UrmaConfig config;
+  config.registered_pool.enabled = true;
   config.dev_name = device;
   server->setUrmaConfig(config);
   server->setUseUrma(true);

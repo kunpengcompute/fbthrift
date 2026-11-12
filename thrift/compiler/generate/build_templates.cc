@@ -62,6 +62,21 @@ int main(int argc, char** argv) {
       auto rel = from_components(mm.first, p.end());
       auto in = std::ifstream(p.string());
       auto buf = std::string(buf_it(in), buf_it());
+      // C++ translation normalizes line endings inside raw string literals. The
+      // lengths below must describe those compiled bytes, not the on-disk
+      // Windows checkout; otherwise consumers read beyond the literal.
+      auto out = buf.begin();
+      for (auto cur = buf.begin(); cur != buf.end(); ++cur) {
+        if (*cur == '\r') {
+          *out++ = '\n';
+          if (cur + 1 != buf.end() && *(cur + 1) == '\n') {
+            ++cur;
+          }
+        } else {
+          *out++ = *cur;
+        }
+      }
+      buf.erase(out, buf.end());
       templates[rel.generic_string()] = std::move(buf);
     }
   }

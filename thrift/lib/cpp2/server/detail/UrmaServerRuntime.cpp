@@ -48,8 +48,15 @@ void requireSameConfig(
   check("rx_depth", existing.rx_depth, requested.rx_depth);
   check("tx_depth", existing.tx_depth, requested.tx_depth);
   check("buffer_size", existing.buffer_size, requested.buffer_size);
+  check("max_send_sge", existing.max_send_sge, requested.max_send_sge);
+  check("io_free_sq_reserve", existing.io_free_sq_reserve, requested.io_free_sq_reserve);
+  check("max_connections", existing.max_connections, requested.max_connections);
+  check("max_retained_bytes", existing.max_retained_bytes, requested.max_retained_bytes);
+  check("max_pending_records", existing.max_pending_records, requested.max_pending_records);
   check("enable_read", existing.enable_read, requested.enable_read);
   check("read_threshold", existing.read_threshold, requested.read_threshold);
+  check("read_window", existing.read_window, requested.read_window);
+  check("offer_window", existing.offer_window, requested.offer_window);
   check(
       "handshake_timeout_ms",
       existing.handshake_timeout_ms,
@@ -58,6 +65,10 @@ void requireSameConfig(
       "max_pending_bytes",
       existing.max_pending_bytes,
       requested.max_pending_bytes);
+  if (existing.registered_pool != requested.registered_pool) {
+    throw std::invalid_argument(folly::to<std::string>(
+        context, ": registered_pool configuration differs"));
+  }
 }
 
 struct RuntimeOwner {

@@ -214,6 +214,8 @@ RocketServerConnection::~RocketServerConnection() {
   // unsubscribe the read callback, but do not destroy the object itself, since
   // other member variables of RocketServerConnection may be borrowing the
   // object.
+  // closeNow() may synchronously notify EOF; never reenter a dying connection.
+  socket_->setReadCB(nullptr);
   socket_->closeNow();
 
   // reclaim any memory in use by pending writes
@@ -701,13 +703,18 @@ void RocketServerConnection::close(folly::exception_wrapper ew) {
 
   socketDrainer_.activate();
 
-  if (!ew.with_exception<RocketException>([this](RocketException rex) {
-        sendError(StreamId{0}, std::move(rex));
-      })) {
-    auto rex = ew
-        ? RocketException(ErrorCode::CONNECTION_ERROR, ew.what())
-        : RocketException(ErrorCode::CONNECTION_CLOSE, "Closing connection");
-    sendError(StreamId{0}, std::move(rex));
+  // EOF or a transport error already ended this Rocket connection. Do not
+  // enqueue a new close frame: a URMA peer may have released its receive
+  // endpoint. Existing writes still complete through the normal close path.
+  if (socket_->good()) {
+    if (!ew.with_exception<RocketException>([this](RocketException rex) {
+          sendError(StreamId{0}, std::move(rex));
+        })) {
+      auto rex = ew
+          ? RocketException(ErrorCode::CONNECTION_ERROR, ew.what())
+          : RocketException(ErrorCode::CONNECTION_CLOSE, "Closing connection");
+      sendError(StreamId{0}, std::move(rex));
+    }
   }
 
   state_ = ConnectionState::CLOSING;

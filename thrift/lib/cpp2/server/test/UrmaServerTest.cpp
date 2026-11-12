@@ -1,13 +1,14 @@
 /* Copyright (c) Huawei Technologies Co., Ltd. 2026. Licensed under Apache-2.0.
  */
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <folly/Conv.h>
-#include <folly/File.h>
 #include <folly/ScopeGuard.h>
 #include <folly/init/Init.h>
 #include <folly/portability/GTest.h>
@@ -16,6 +17,7 @@
 #include <thrift/lib/cpp2/util/ScopedServerThread.h>
 #ifdef FOLLY_HAVE_URMA
 #include <folly/io/async/urma/UrmaInit.h>
+#include <folly/io/async/urma/UrmaAsyncSocket.h>
 #include <thrift/lib/cpp2/server/detail/UrmaServerRuntime.h>
 #endif
 
@@ -104,6 +106,8 @@ void expectConfigurationConflicts(
   };
   check(&folly::UrmaConfig::dev_name, "dev_name", existing.dev_name + "-other");
   check(&folly::UrmaConfig::rx_depth, "rx_depth", existing.rx_depth + 1);
+  check(&folly::UrmaConfig::rx_target, "rx_target", existing.rx_target + 1);
+  check(&folly::UrmaConfig::max_send_sge, "max_send_sge", existing.max_send_sge + 1);
   check(&folly::UrmaConfig::tx_depth, "tx_depth", existing.tx_depth + 1);
   check(
       &folly::UrmaConfig::buffer_size, "buffer_size", existing.buffer_size + 1);
@@ -123,10 +127,6 @@ void expectConfigurationConflicts(
       &folly::UrmaConfig::max_pending_bytes,
       "max_pending_bytes",
       existing.max_pending_bytes + 1);
-  check(
-      &folly::UrmaConfig::max_retained_bytes,
-      "max_retained_bytes",
-      existing.max_retained_bytes + 1);
   auto differentPool = existing;
   differentPool.registered_pool.pool_max_size += 4096;
   try {
@@ -337,29 +337,41 @@ TEST(UrmaServerHardware, ShutdownSetClosesAnAcceptedUrmaHandshakeSocket) {
   server->setUseUrma(true);
   {
     util::ScopedServerThread running(server);
-    folly::File client(::socket(AF_INET, SOCK_STREAM, 0), true);
-    ASSERT_GE(client.fd(), 0);
-    timeval timeout{2, 0};
-    ASSERT_EQ(
-        ::setsockopt(
-            client.fd(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)),
-        0);
-    sockaddr_storage address{};
-    auto length = running.getAddress()->getAddress(&address);
-    ASSERT_EQ(
-        ::connect(client.fd(), reinterpret_cast<sockaddr*>(&address), length),
-        0);
-    char hello[4096];
-    // Receiving HELLO proves the accepted socket has entered the URMA path.
-    ASSERT_GT(::recv(client.fd(), hello, sizeof(hello), 0), 0);
+    folly::EventBase evb;
+    struct Reader : folly::AsyncTransport::ReadCallback {
+      char byte{};
+      bool closed{false};
+      void getReadBuffer(void** data, size_t* size) override {
+        *data = &byte;
+        *size = 1;
+      }
+      void readDataAvailable(size_t) noexcept override {}
+      void readEOF() noexcept override { closed = true; }
+      void readErr(const folly::AsyncSocketException&) noexcept override {
+        closed = true;
+      }
+    } reader;
+    auto client =
+        folly::UrmaAsyncSocket::newSocket(&evb, *running.getAddress());
+    client->setReadCB(&reader);
+    auto wait = [&](auto ready) {
+      for (int i = 0; i < 1000; ++i) {
+        evb.loopOnce(EVLOOP_NONBLOCK);
+        if (ready())
+          return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+      return false;
+    };
+    // Complete the handshake with a real peer before testing shutdown.
+    ASSERT_TRUE(wait([&] {
+      return static_cast<folly::UrmaAsyncSocket*>(client.get())->isUrmaReady();
+    }));
     sockets->shutdownAll();
-    ssize_t received;
-    do {
-      // TCP may split HELLO across reads; drain any remainder before EOF.
-      received = ::recv(client.fd(), hello, sizeof(hello), 0);
-    } while (received > 0);
-    EXPECT_TRUE(received == 0 || (received < 0 && errno == ECONNRESET))
-        << "Accepted URMA socket was not shut down, errno=" << errno;
+    EXPECT_TRUE(wait([&] { return reader.closed; }))
+        << "Accepted URMA socket was not shut down";
+    client->setReadCB(nullptr);
+    client->closeNow();
   }
   EXPECT_FALSE(folly::UrmaInit::isInitialized());
 }

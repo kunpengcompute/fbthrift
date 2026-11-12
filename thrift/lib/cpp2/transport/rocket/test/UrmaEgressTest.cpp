@@ -4,6 +4,7 @@
 #include <folly/init/Init.h>
 #include <folly/io/async/AsyncServerSocket.h>
 #include <folly/portability/GTest.h>
+#include <folly/portability/Sockets.h>
 #include <thrift/lib/cpp2/transport/rocket/server/RocketServerConnection.h>
 #ifdef FOLLY_HAVE_URMA
 #include <folly/io/async/urma/UrmaAsyncSocket.h>
@@ -37,6 +38,85 @@ struct Completion : MessageChannel::SendCallback {
     error = ew.what().toStdString();
   }
 };
+
+// Exercise Rocket's real EOF callback on a socket pair. Count transport writes
+// so a rejected or abandoned close frame cannot make this regression pass.
+class CountingSocket : public folly::AsyncSocket {
+ public:
+  CountingSocket(folly::EventBase* evb, folly::NetworkSocket fd,
+                 size_t& writes, size_t& bytes)
+      : AsyncSocket(evb, fd), writes_(writes), bytes_(bytes) {}
+  void writeChain(WriteCallback* cb, std::unique_ptr<folly::IOBuf>&& data,
+                  folly::WriteFlags flags) override {
+    ++writes_;
+    bytes_ += data->computeChainDataLength();
+    AsyncSocket::writeChain(cb, std::move(data), flags);
+  }
+ private:
+  size_t& writes_;
+  size_t& bytes_;
+};
+
+void testPeerEof(bool pendingWrite) {
+  folly::EventBase evb;
+  int fds[2];
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  auto peer = folly::makeGuard([&] { ::close(fds[1]); });
+  size_t writes = 0, bytes = 0;
+  auto transport = folly::AsyncTransport::UniquePtr(
+      new CountingSocket(&evb, folly::NetworkSocket(fds[0]), writes, bytes));
+  MemoryTracker ingress, egress;
+  auto* connection = new RocketServerConnection(
+      std::move(transport), std::make_unique<Handler>(), ingress, egress);
+  folly::DelayedDestruction::DestructorGuard hold(connection);
+  Completion callback;
+  if (pendingWrite) {
+    connection->send(folly::IOBuf::copyBuffer("queued before EOF"),
+                     MessageChannel::SendCallbackPtr(&callback));
+  }
+  ASSERT_EQ(::shutdown(fds[1], SHUT_WR), 0);
+  for (int i = 0; i < 20 && !connection->getDestroyPending(); ++i)
+    evb.loopOnce(EVLOOP_NONBLOCK);
+  EXPECT_TRUE(connection->getDestroyPending());
+  EXPECT_EQ(writes, pendingWrite ? 1 : 0);
+  EXPECT_EQ(bytes, pendingWrite ? sizeof("queued before EOF") - 1 : 0);
+  EXPECT_EQ(callback.sent, pendingWrite ? 1 : 0);
+  EXPECT_EQ(callback.failed, 0);
+  EXPECT_EQ(egress.getUsage(), 0);
+}
+
+TEST(UrmaEgress, PeerEofDoesNotSendAnotherCloseFrame) {
+  testPeerEof(false);
+}
+
+TEST(UrmaEgress, PeerEofPreservesAlreadyQueuedWrite) {
+  testPeerEof(true);
+}
+
+TEST(UrmaEgress, LocalCloseStillNotifiesHealthyPeer) {
+  folly::EventBase evb;
+  int fds[2];
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  auto peer = folly::makeGuard([&] { ::close(fds[1]); });
+  size_t writes = 0, bytes = 0;
+  auto transport = folly::AsyncTransport::UniquePtr(
+      new CountingSocket(&evb, folly::NetworkSocket(fds[0]), writes, bytes));
+  MemoryTracker ingress, egress;
+  auto* connection = new RocketServerConnection(
+      std::move(transport), std::make_unique<Handler>(), ingress, egress);
+  folly::DelayedDestruction::DestructorGuard hold(connection);
+  connection->close({});
+  evb.loopOnce(EVLOOP_NONBLOCK);
+  EXPECT_EQ(writes, 1);
+  EXPECT_GT(bytes, 0);
+  char frame[256];
+  EXPECT_GT(::recv(fds[1], frame, sizeof(frame), MSG_DONTWAIT), 0);
+  ASSERT_EQ(::shutdown(fds[1], SHUT_WR), 0);
+  for (int i = 0; i < 20 && !connection->getDestroyPending(); ++i)
+    evb.loopOnce(EVLOOP_NONBLOCK);
+  EXPECT_TRUE(connection->getDestroyPending());
+  EXPECT_EQ(writes, 1);
+}
 
 // A silent TCP peer keeps the URMA handshake pending while Rocket flushes
 // its batch into the real transport. No remote peer or traffic is required.
@@ -87,7 +167,7 @@ TEST(UrmaEgress, FrameworkTimeoutAndBufferAccounting) {
   EXPECT_EQ(urma->getAllocatedBytesBuffered(), totalCapacity);
   EXPECT_EQ(egress.getUsage(), totalCapacity);
   urma->closeNow();
-  evb.loopOnce(EVLOOP_NONBLOCK);  // Drain Rocket's final error frame.
+  evb.loopOnce(EVLOOP_NONBLOCK);  // Drain Rocket's close callbacks.
   EXPECT_EQ(egress.getUsage(), 0);
   EXPECT_FALSE(connection->areStreamsPaused());
   EXPECT_EQ(first.failed, 1);
@@ -101,7 +181,11 @@ TEST(UrmaEgress, FrameworkTimeoutAndBufferAccounting) {
 
 TEST(UrmaEgress, TcpStillReceivesFrameworkTimeout) {
   folly::EventBase evb;
-  auto socket = folly::AsyncSocket::newSocket(&evb);
+  int fds[2];
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  auto peer = folly::makeGuard([&] { ::close(fds[1]); });
+  auto socket = folly::AsyncSocket::newSocket(
+      &evb, folly::NetworkSocket(fds[0]));
   auto* tcp = socket.get();
   MemoryTracker ingress, egress;
   RocketServerConnection::Config cfg;

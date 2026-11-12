@@ -1,18 +1,22 @@
 # API参考
 
-## FbThrift v1.1.0
+## FbThrift V1.1.0
 
-本章介绍FbThrift v1.1.0新增的ThreadManager任务调度与Header帧处理接口。
+本章介绍FbThrift V1.1.0新增的ThreadManager任务调度与Header帧处理接口。
 
-### FbThrift v1.1.0接口介绍
+### FbThrift V1.1.0接口介绍
 
 |接口名称|所属模块|接口说明|
 |--|--|--|
-|ThreadManager::Impl::addFunc|ThreadManager|直接接收并入队`folly::Func`，避免普通RPC任务预先构造`FunctionRunner`。|
-|ThreadManager::Task::getRunnable|ThreadManager|旧接口需要`Runnable`时，按需将`folly::Func`延迟包装为`FunctionRunner`。|
+|ThreadManager::Impl::addFunc|ThreadManager|直接接收并入队folly::Func，避免普通RPC任务预先构造FunctionRunner。|
+|ThreadManager::Task::getRunnable|ThreadManager|旧接口需要Runnable时，按需将folly::Func延迟包装为FunctionRunner。|
 |THeader::removeHeader|Header Transport|解析消息头并通过输出参数返回完整帧长度。|
 |FramingHandler::removeFrame|Header Transport|返回解帧结果、剩余长度、Header对象及帧长度。|
 |FramingHandler::read|Header Transport|根据帧长度滑动平均值动态调整读缓冲区。|
+
+|参数名|参数说明|输入/输出|
+|--|--|--|
+|queue|待解析的输入缓冲队列，解帧成功后已消费的字节从队列中移除|输入/输出|
 
 ### ThreadManager任务调度接口
 
@@ -39,7 +43,7 @@ void ThreadManager::Impl::addFunc(
 |priority|任务优先级，入队前会与任务来源共同映射为队列优先级|输入|
 |func|待执行的一次性、可移动函数对象|输入|
 |expiration|排队过期时间，单位为毫秒；0表示不启用过期控制|输入|
-|source|任务来源，例如`INTERNAL`或`UPSTREAM`|输入|
+|source|任务来源，例如INTERNAL或UPSTREAM|输入|
 
 ##### 执行与回退
 
@@ -59,7 +63,7 @@ void ThreadManager::Impl::addFunc(
 const std::shared_ptr<Runnable>& ThreadManager::Task::getRunnable() const;
 ```
 
->![表示说明的图片](public_sys-resources/icon-note.gif)**说明:**
+>![表示说明的图片](public_sys-resources/icon-note.gif) **说明:**
 >该接口是惰性兼容路径，不属于普通RPC任务的常规执行路径。
 
 ### Header帧解析与自适应读缓冲接口
@@ -68,7 +72,7 @@ const std::shared_ptr<Runnable>& ThreadManager::Task::getRunnable() const;
 
 ##### THeader::removeHeader函数功能
 
-从`IOBufQueue`中解析Header帧。除返回消息数据和待补充字节数外，FbThrift v1.1.0新增`frameLength`输出参数，用于向上层传递本次完整帧的实际长度。空帧或数据不完整时返回0。
+从`IOBufQueue`中解析Header帧。除返回消息数据和待补充字节数外，FbThrift V1.1.0新增`frameLength`输出参数，用于向上层传递本次完整帧的实际长度。空帧或数据不完整时返回0。
 
 ##### THeader::removeHeader函数定义
 
@@ -122,8 +126,8 @@ readSize = std::clamp(avgRequestSize_ * 16, size_t(2048), size_t(524288));
 
 计算结果用于刷新Pipeline读缓冲设置，缓冲区范围限制为2KB至512KB。不完整帧场景还会综合`remaining`与队列尾部可用空间，减少大帧的重复读取，同时避免小请求长期占用过大的固定缓冲区。
 
-> ![表示说明的图片](public_sys-resources/icon-note.gif)**兼容性说明：**
->自适应逻辑会在读路径中刷新缓冲设置。依赖`setReadBufferSize()`固定缓冲区语义的调用方，应在升级到FbThrift v1.1.0时执行回归验证。
+>![表示说明的图片](public_sys-resources/icon-note.gif) **兼容性说明：**
+>自适应逻辑会在读路径中刷新缓冲设置。依赖`setReadBufferSize()`固定缓冲区语义的调用方，应在升级到FbThrift V1.1.0时执行回归验证。
 
 ## FbThrift v1.0.0
 
@@ -376,4 +380,4 @@ void writeBeContiguous(folly::io::QueueAppender& out, const T* data, uint32_t si
 
 |文档版本|发布日期|修改说明|
 |:---|:---|:---|
-|01|2026-9-30|第一次正式发布。|
+|01|2026-09-30|第一次正式发布。|

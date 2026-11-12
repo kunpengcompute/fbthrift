@@ -22,7 +22,7 @@
 </tr>
 <tr id="row34726251"><th class="firstcol" valign="top" width="42.17%" id="mcps1.1.3.2.1"><p id="p56669300"><a name="p56669300"></a><a name="p56669300"></a>软件版本</p>
 </th>
-<td class="cellrowborder" valign="top" width="57.830000000000005%" headers="mcps1.1.3.2.1 "><p id="p11923034"><a name="p11923034"></a><a name="p11923034"></a><span id="text189831542174711"><a name="text189831542174711"></a><a name="text189831542174711"></a>v1.1.0</span></p>
+<td class="cellrowborder" valign="top" width="57.830000000000005%" headers="mcps1.1.3.2.1 "><p id="p11923034"><a name="p11923034"></a><a name="p11923034"></a><span id="text189831542174711"><a name="text189831542174711"></a><a name="text189831542174711"></a>V1.1.0</span></p>
 </td>
 </tr>
 </tbody>
@@ -32,9 +32,9 @@
 
 |操作系统|CPU类型|编译器|
 |--|--|--|
-|Debian 12等Linux系统|鲲鹏920处理器、鲲鹏950处理器等AArch64处理器|Clang 16|
+|Debian 12|鲲鹏920处理器、鲲鹏950处理器|Clang 16|
 
-> ![表示说明的图片](public_sys-resources/icon-note.gif)**说明：**
+>![表示说明的图片](public_sys-resources/icon-note.gif) **说明：**
 >Binary Protocol优化不依赖SVE2指令集，在所有aarch64和x86-64平台上均可通过编译器自动向量化获得性能提升。Compact Protocol的SVE2优化仅在支持SVE2指令集的CPU上生效，不支持时自动回退到scalar路径。
 
 ### 病毒扫描结果
@@ -43,7 +43,7 @@
 
 ## 版本兼容性说明
 
-### FbThrift v1.1.0兼容性与风险说明
+### FbThrift V1.1.0兼容性与风险说明
 
 - ThreadManager保留原有`FunctionRunner`和`std::shared_ptr<Runnable>`接口；如出现兼容性问题，可通过`--thrift_thread_manager_direct_func_enabled=false`回退。
 - `THeader::removeHeader()`新增`frameLength`引用参数，`FramingHandler::removeFrame()`返回值由三元组扩展为四元组。自定义调用方、派生类及Python/Cython绑定必须同步修改后重新编译。
@@ -56,40 +56,40 @@
 
 ## 版本更新说明
 
-### FbThrift v1.1.0
+### FbThrift V1.1.0
 
-#### FbThrift v1.1.0新增特性
+#### FbThrift V1.1.0新增特性
 
 |特性描述|更新说明|
 |--|--|
-|ThreadManager直接调度`folly::Func`|`ThreadManager::Task`使用`std::variant<std::shared_ptr<Runnable>, folly::Func>`保存任务。普通RPC通过`addFunc()`直接入队和执行，消除常规热路径上的`FunctionRunner`分配、`shared_ptr`引用计数及虚函数转发。|
-|旧任务接口惰性兼容|`getRunnable()`仅在`removeNextPending()`、任务过期回调等旧接口明确需要`Runnable`时，才延迟创建`FunctionRunner`。原有显式`Runnable`提交路径保持不变。|
-|ThreadManager运行时回退|新增`thrift_thread_manager_direct_func_enabled`开关，默认启用直接调度；设置为`false`可立即恢复原有`FunctionRunner::create()`路径。|
-|Header帧长度透传|`THeader::removeHeader()`新增`frameLength`输出参数，HeaderClientChannel、HeaderServerChannel及DuplexChannel将完整帧长度透传至FramingHandler。|
-|Header自适应读缓冲|`FramingHandler::read()`根据帧长度维护10样本权重的滑动平均值，以平均帧长16倍动态设置读缓冲，并将范围限制在2KB至512KB。|
+|ThreadManager直接调度folly::Func|ThreadManager::Task使用`std::variant<std::shared_ptr<Runnable>`, folly::Func>保存任务。普通RPC通过addFunc()直接入队和执行，消除常规热路径上的FunctionRunner分配、shared_ptr引用计数及虚函数转发。|
+|旧任务接口惰性兼容|getRunnable()仅在removeNextPending()、任务过期回调等旧接口明确需要Runnable时，才延迟创建FunctionRunner。原有显式Runnable提交路径保持不变。|
+|ThreadManager运行时回退|新增thrift_thread_manager_direct_func_enabled开关，默认启用直接调度；设置为false可立即恢复原有FunctionRunner::create()路径。|
+|Header帧长度透传|THeader::removeHeader()新增frameLength引用参数，HeaderClientChannel、HeaderServerChannel及DuplexChannel将完整帧长度透传至FramingHandler。|
+|Header自适应读缓冲|FramingHandler::read()根据帧长度维护10样本权重的滑动平均值，以平均帧长16倍动态设置读缓冲，并将范围限制在2KB至512KB。|
 |专项单元测试|ThreadManager新增5个直接调度专项UT；Header帧长和FramingHandler补充14个测试源码用例，覆盖正常帧、空队列、空指针、分帧及自适应计算路径。|
 
-### FbThrift v1.0.0
+### FbThrift V1.1.0
 
-#### FbThrift v1.0.0新增特性
+#### FbThrift V1.1.0新增特性
 
 |特性描述|更新说明|
 |--|--|
-|Compact Protocol批量Varint编码优化|针对连续整型数组（int32/int64），引入基于ARM SVE2指令集的批量Varint编码内核。通过`dispatchVarintEncode32`/`dispatchVarintEncode64`进行跨TU运行时分发，在支持SVE2的CPU上自动启用向量化内核，不支持时回退到scalar路径。|
-|Binary Protocol批量写入优化|针对连续整型数组（int16/int32/int64），引入基于`memcpy`和`bswap`的紧凑循环，利用编译器自动向量化提升性能。在aarch64上自动展开为NEON指令，在x86-64上自动展开为SSE2指令。|
-|编译期SFINAE自动分发|通过`if constexpr`和`has_batched_int_list_writer`探针，在编译期自动识别协议和容器类型，对符合条件的连续整型数组自动选择批量处理路径，对不满足条件的类型透明回退到逐元素处理，对下游业务代码零侵入。|
+|Compact Protocol批量Varint编码优化|针对连续整型数组（int32/int64），引入基于ARM SVE2指令集的批量Varint编码内核。通过dispatchVarintEncode32/dispatchVarintEncode64进行跨TU运行时分发，在支持SVE2的CPU上自动启用向量化内核，不支持时回退到scalar路径。|
+|Binary Protocol批量写入优化|针对连续整型数组（int16/int32/int64），引入基于memcpy`和bswap的紧凑循环，利用编译器自动向量化提升性能。在aarch64上自动展开为NEON指令，在x86-64上自动展开为SSE2指令。|
+|编译期SFINAE自动分发|通过if constexpr和has_batched_int_list_writer探针，在编译期自动识别协议和容器类型，对符合条件的连续整型数组自动选择批量处理路径，对不满足条件的类型透明回退到逐元素处理，对下游业务代码零侵入。|
 
-#### FbThrift v1.0.0优化介绍
+#### FbThrift V1.1.0优化介绍
 
 |协议|优化类型|支持元素类型|触发条件|
 |--|--|--|--|
-|Compact Protocol|ARM SVE2批量Varint编码|int32_t, int64_t|编译开启`THRIFT_ENABLE_ARM_SVE2`且运行时CPU支持SVE2。|
+|Compact Protocol|ARM SVE2批量Varint编码|int32_t, int64_t|编译开启THRIFT_ENABLE_ARM_SVE2且运行时CPU支持SVE2。|
 |Compact Protocol|Scalar批量Varint编码（回退）|int32_t, int64_t|编译未开启SVE2或运行时CPU不支持SVE2。|
 |Binary Protocol|编译器自动向量化批量写入|int16_t, int32_t, int64_t|容器为连续内存布局。|
 
 ## 版本配套文档
 
-### FbThrift v1.1.0版本配套文档
+### FbThrift V1.1.0版本配套文档
 
 <a name="table1191773710200"></a>
 <table><thead align="left"><tr id="row1291816372202"><th class="cellrowborder" valign="top" width="45.019999999999996%" id="mcps1.1.4.1.1"><p id="p291823714205"><a name="p291823714205"></a><a name="p291823714205"></a>文档名称</p>
@@ -123,10 +123,6 @@
 </tr>
 </tbody>
 </table>
-
-### FbThrift v1.0.0版本配套文档
-
-当前文档已包含先前文档。
 
 ### 获取文档的方法
 

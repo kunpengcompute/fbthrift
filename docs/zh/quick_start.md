@@ -2,8 +2,8 @@
 
 本文档指导用户从零构建带四项请求链路优化的FbThrift，并编译、启动配套Benchmark。四项优化包括动态收包缓冲区、Folly IOBuf TLS内存池、ThreadManager direct-func和请求热路径去锁。
 
-> ![表示说明的图片](public_sys-resources/icon-note.gif) **说明:**
->本文档适用版本：FbThrift v1.1.0。
+>![表示说明的图片](public_sys-resources/icon-note.gif) **说明:**
+>本文档适用版本：FbThrift V1.1.0。
 
 ## 创建工作目录并获取公共Benchmark仓库
 
@@ -67,7 +67,7 @@ SHA-256 校验用于验证文件完整性，不单独证明来源真实性。请
    ```
 
    >![表示说明的图片](./public_sys-resources/icon-note.gif) **说明：**
-   >该命令读取校验文件中的摘要值，与实际补丁的 SHA-256 摘要进行比较，并检查校验文件格式。[命令说明](https://www.gnu.org/software/coreutils/manual/html_node/sha2-utilities.html)
+   >该命令读取校验文件中的摘要值，与实际补丁的SHA-256摘要进行比较，并检查校验文件格式。[命令说明](https://www.gnu.org/software/coreutils/manual/html_node/sha2-utilities.html)
 
    校验通过时，输出如下所示。
 
@@ -78,7 +78,7 @@ SHA-256 校验用于验证文件完整性，不单独证明来源真实性。请
 2. AccLibBenchmark作为压测工具的代码汇总。拉取后，只应用其中的`fbthrift_folly_benchmark`压测工具，以及`fb_folly_autobuild`的自动化脚本，如上方[目录](#创建工作目录并获取公共benchmark仓库)结构所示。
 
    >![表示说明的图片](public_sys-resources/icon-note.gif) **说明:**
-   >使用脚本安装时,默认拉取优化代码版本，若基于开源仓需要代码补丁，请将补丁仓master分支下的`fbthrift_folly.patch`放在`fb_folly_autobuild/`目录下，脚本支持自动应用补丁。
+   >使用脚本安装时，默认拉取优化代码版本，若基于开源仓需要代码补丁，请将补丁仓master分支下的`fbthrift_folly.patch`放在`fb_folly_autobuild/`目录下，脚本支持自动应用补丁。
 
 **结果判定**
 
@@ -115,45 +115,45 @@ git apply "$WORK/fbthrift-patches/fbthrift_folly.patch"
 
 - Debian或Ubuntu执行以下命令。
 
-  ```bash
-  sudo apt-get update
-  sudo apt-get install -y \
-  git cmake build-essential pkg-config xz-utils numactl \
-  liburing-dev libboost-all-dev libdouble-conversion-dev \
-  libgflags-dev libgoogle-glog-dev libevent-dev libsodium-dev \
-  liblz4-dev libsnappy-dev libzstd-dev libfmt-dev liblzma-dev \
-  libgtest-dev libgmock-dev libssl-dev libaio-dev \
-  libunwind-dev libdwarf-dev binutils-dev libiberty-dev \
-  zlib1g-dev libbz2-dev
-  ```
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y \
+   git cmake build-essential pkg-config xz-utils numactl \
+   liburing-dev libboost-all-dev libdouble-conversion-dev \
+   libgflags-dev libgoogle-glog-dev libevent-dev libsodium-dev \
+   liblz4-dev libsnappy-dev libzstd-dev libfmt-dev liblzma-dev \
+   libgtest-dev libgmock-dev libssl-dev libaio-dev \
+   libunwind-dev libdwarf-dev binutils-dev libiberty-dev \
+   zlib1g-dev libbz2-dev
+   ```
 
 - openEuler或其他RPM系统执行以下命令。
 
-  ```bash
-  sudo dnf install -y \
-  git cmake make gcc gcc-c++ pkgconf-pkg-config numactl \
-  fmt fmt-devel glog glog-devel gflags gflags-devel \
-  libevent libevent-devel double-conversion double-conversion-devel \
-  boost boost-devel libunwind libunwind-devel \
-  lz4 lz4-devel zstd zstd-devel libsodium libsodium-devel \
-  liburing liburing-devel libatomic zlib zlib-devel \
-  openssl openssl-devel
-  ```
+   ```bash
+   sudo dnf install -y \
+   git cmake make gcc gcc-c++ pkgconf-pkg-config numactl \
+   fmt fmt-devel glog glog-devel gflags gflags-devel \
+   libevent libevent-devel double-conversion double-conversion-devel \
+   boost boost-devel libunwind libunwind-devel \
+   lz4 lz4-devel zstd zstd-devel libsodium libsodium-devel \
+   liburing liburing-devel libatomic zlib zlib-devel \
+   openssl openssl-devel
+   ```
 
 - Folly需要使用Snappy 1.1.8及以上版本的动态库。系统依赖安装完成后，执行以下命令确认Snappy版本及`libsnappy.so`动态库路径。
 
-  ```bash
-  pkg-config --modversion snappy
-  ldconfig -p | grep 'libsnappy\.so'
-  ```
+   ```bash
+   pkg-config --modversion snappy
+   ldconfig -p | grep 'libsnappy\.so'
+   ```
   
-  如果Snappy版本低于1.1.8、仅安装了静态库，或者Folly与Benchmark实际加载了不同版本的`libsnappy.so`，后续编译Benchmark时可能出现以下错误。
+   如果Snappy版本低于1.1.8、仅安装了静态库，或者Folly与Benchmark实际加载了不同版本的`libsnappy.so`，后续编译Benchmark时可能出现以下错误。
   
-  ```output
-  undefined symbol: _ZTIN6snappy6sourceE
-  ```
+   ```output
+   undefined symbol: _ZTIN6snappy6sourceE
+   ```
   
-  出现该错误时，应先升级Snappy动态库并确保Folly与Benchmark使用同一版本，然后重新编译Folly和Benchmark。
+   出现该错误时，应先升级Snappy动态库并确保Folly与Benchmark使用同一版本，然后重新编译Folly和Benchmark。
 
 ### 准备Clang 16
 
@@ -191,7 +191,7 @@ FbThrift源码已准备完成。以下命令获取Folly、Fizz、Wangle依赖及
    git clone https://gitcode.com/boostkit/AccLibBenchmark.git "$ACCLIB"
    ```
 
-仓库中与FbThrift相关的两个目录职责如下。(若无权限请联系管理员申请并说明原因。)
+仓库中与FbThrift相关的两个目录职责如下。（若无权限请在[FbThrift开源仓issue页面](https://gitcode.com/boostkit/fbthrift/issues)反馈。）
 
 - [fbthrift_folly_benchmark](https://gitcode.com/boostkit/AccLibBenchmark/tree/master/fbthrift_folly_benchmark)：存放`press.thrift`、CMake配置、`press_client`和`press_server`源码。
 - [fb_folly_autobuild](https://gitcode.com/boostkit/AccLibBenchmark/tree/master/fb_folly_autobuild)：存放`install.py`自动构建脚本、`run.py`性能矩阵脚本及使用说明。
@@ -209,9 +209,10 @@ AccLibBenchmark/
     └── run.py
 ```
 
-由于AccLibBenchmark作为压测工具的代码汇总，众多工具我们不会使用。因此拉取压测工具代码仓后后，只选用其中的`fbthrift_folly_benchmark`压测工具，以及`fb_folly_autobuild`的自动化脚本，如上方目录结构所示。
+由于AccLibBenchmark作为压测工具的代码汇总，众多工具我们不会使用。因此拉取压测工具代码仓后，只选用其中的`fbthrift_folly_benchmark`压测工具，以及`fb_folly_autobuild`的自动化脚本，如上方目录结构所示。
 
->![表示说明的图片](./public_sys-resources/icon-note.gif) **说明:** 使用脚本安装时，默认拉取优化代码版本。若需要由脚本应用补丁，请先按第1.3节完成补丁校验，再将`fbthrift_folly.patch`放在`fb_folly_autobuild/`目录下。脚本安装方式请参见[编译脚本](#编译脚本)
+>![表示说明的图片](./public_sys-resources/icon-note.gif) **说明:**
+>使用脚本安装时，默认拉取优化代码版本。若需要由脚本应用补丁，请先完成补丁校验，再将`fbthrift_folly.patch`放在`fb_folly_autobuild/`目录下。脚本安装方式请参见[编译脚本](#编译脚本)
 
 ### 编译Folly
 
@@ -392,7 +393,7 @@ export LD_LIBRARY_PATH="$INS/fbthrift/lib:$INS/fbthrift/lib64:$INS/wangle/lib:$I
    test -f run.py
    ```
 
-如[创建工作目录并获取公共Benchmark](#创建工作目录并获取公共benchmark仓库)章节，若基于FbThrift v1.1.0发布包构建，需提供`fbthrift_folly.patch`补丁并将其放到当前目录。
+如[创建工作目录并获取公共Benchmark](#创建工作目录并获取公共benchmark仓库)章节，若基于FbThrift V1.1.0发布包构建，需提供`fbthrift_folly.patch`补丁并将其放到当前目录。
 
 ### 适配公共仓库目录
 
@@ -480,4 +481,4 @@ THRIFT_ENABLE_ARM_SVE2 = True
 
 |文档版本|发布日期|修改说明|
 |:---|:---|:---|
-|01|2026-9-30|第一次正式发布。|
+|01|2026-09-30|第一次正式发布。|

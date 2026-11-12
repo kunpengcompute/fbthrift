@@ -1,11 +1,13 @@
 # FbThrift Request Path Optimization Introduction
 
-English|[简体中文](./README.md)
+<!-- md-trans-meta sourceCommit=c085ca84d69a0b59b67552ad7e34db264c12bf60 translatedAt=2026-10-21T03:43:04.247Z pushedAt=2026-10-21T11:27:31.022Z -->
+
+[简体中文](./README.md) | English
 
 ## Latest News
 
-- [2026.09.30]: Released the FbThrift v1.1.0 optimization patch. Added dynamic receive buffer, Folly IOBuf TLS memory pool, ThreadManager direct-func, and lock removal on the request hot path, along with a complete benchmark and automated build pipeline.
-- [2026.06.30]: Released the FbThrift v1.0.0 patch based on Meta's open-source FbThrift serialization framework. This patch optimizes batch encoding of integer arrays in the FbThrift serialization framework, significantly improving serialization performance through the Arm SVE2 instruction set and compiler auto-vectorization.
+- [2026-09-30]: Released the FbThrift v1.1.0 optimization patch. Added dynamic receive buffer, Folly IOBuf TLS memory pool, ThreadManager direct-func, and lock removal on the request hot path, along with a complete benchmark and automated build pipeline.
+- [2026-06-30]: Released the FbThrift v1.0.0 patch based on Meta's open-source FbThrift serialization framework. This patch optimizes batch encoding of integer arrays in the FbThrift serialization framework, significantly improving serialization performance through the Arm SVE2 instruction set and compiler auto-vectorization.
 
 ## Project Introduction
 
@@ -20,9 +22,9 @@ FbThrift v1.1.0 further covers network packet reception, buffer allocation, CPU 
 fbthrift/
 ├── docs/                           # Documentation directory
 │   ├── en/                         # English documents
-│   │   ├── api_reference.md        # api_reference
-│   │   ├── quick_start.md          # quick_start
-│   │   └── release_notes.md        # release_notes
+│   │   ├── api_reference.md        # API Reference
+│   │   ├── quick_start.md          # Quick Start
+│   │   └── release_notes.md        # Release Notes
 │   └── LICENSE
 │   ├── zh/                         # Chinese documents
 │   │   ├── api_reference.md        # API Reference

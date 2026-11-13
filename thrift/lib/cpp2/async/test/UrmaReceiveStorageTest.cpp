@@ -328,7 +328,7 @@ extern "C" urma_status_t urma_post_jfs_wr(urma_jfs_t* q, urma_jfs_wr_t* wr, urma
   if (result == URMA_SUCCESS) for (auto* p = wr; p; p = p->next) {
     if (p->opcode == URMA_OPC_READ)
       postedRead[{q->jfs_cfg.jfc, p->user_ctx}] = {p->rw.dst.sge[0].addr, p->rw.dst.sge[0].len, true};
-    if (p->opcode == URMA_OPC_SEND_IMM && p->send.src.sge[0].len == 32) {
+    if (p->opcode == URMA_OPC_SEND_IMM && p->send.src.sge[0].len == 40) {
       const auto* header = reinterpret_cast<const uint8_t*>(p->send.src.sge[0].addr);
       // Four RX slots intentionally cause RNR; retries reuse the business ID.
       if (!observedPulls.emplace(folly::urma_detail::getInteger(header + 8, 8),
@@ -336,7 +336,7 @@ extern "C" urma_status_t urma_post_jfs_wr(urma_jfs_t* q, urma_jfs_wr_t* wr, urma
         continue;
       const size_t bytes = folly::urma_detail::getInteger(header + 24, 4);
       const auto containsSource = [&](const DmaRange& range) {
-        return range.contains(p->send.imm_data, bytes);
+        return range.contains(folly::urma_detail::getInteger(header + 32, 8), bytes);
       };
       if (std::any_of(serializedSources.begin(), serializedSources.end(), containsSource))
         ++payloadOffers;

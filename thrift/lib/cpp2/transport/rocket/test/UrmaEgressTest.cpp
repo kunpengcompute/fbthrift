@@ -6,6 +6,8 @@
 #include <folly/portability/GTest.h>
 #include <folly/portability/Sockets.h>
 #include <thrift/lib/cpp2/transport/rocket/server/RocketServerConnection.h>
+#include <thrift/lib/cpp2/async/RequestChannel.h>
+#include <thrift/lib/cpp2/protocol/BinaryProtocol.h>
 #ifdef FOLLY_HAVE_URMA
 #include <folly/io/async/urma/UrmaAsyncSocket.h>
 #include <folly/io/async/urma/UrmaInit.h>
@@ -196,6 +198,64 @@ TEST(UrmaEgress, TcpStillReceivesFrameworkTimeout) {
 }
 
 #ifdef FOLLY_HAVE_URMA
+TEST(UrmaEgress, SynchronousSerializationFailsWithoutReplayingUserCode) {
+  auto* device = std::getenv("FBTHRIFT_URMA_TEST_DEVICE");
+  if (!device || !*device) GTEST_SKIP() << "Set FBTHRIFT_URMA_TEST_DEVICE";
+  folly::UrmaConfig config;
+  config.dev_name = device;
+  config.registered_pool.pool_size = config.registered_pool.pool_max_size = 65536;
+  config.registered_pool.elastic = false;
+  config.registered_pool.tls_block_size = 4096;
+  config.registered_pool.classes = {{4096}, {16384}};
+  folly::UrmaInit::init(config);
+  auto finish = folly::makeGuard([] { folly::UrmaInit::fini(); });
+  BinaryProtocolWriter protocol;
+  transport::THeader header;
+  RpcOptions options;
+  const std::string body(8192, 'x');
+  size_t calls = 0;
+  auto write = [&](BinaryProtocolWriter* writer) {
+    ++calls;
+    writer->writeString(body);
+  };
+  auto size = [&](BinaryProtocolWriter*) { return body.size() + 4; };
+  auto serialize = [&] {
+    return preprocessSendT(&protocol, options, nullptr, header, "pressure",
+        folly::FunctionRef<void(BinaryProtocolWriter*)>(write),
+        folly::FunctionRef<size_t(BinaryProtocolWriter*)>(size), 0);
+  };
+  std::vector<folly::UrmaPoolBuffer> pressure;
+  while (auto block = folly::UrmaInit::poolAlloc(4096))
+    pressure.push_back(std::move(block));
+  EXPECT_THROW(serialize(), std::bad_alloc);
+  EXPECT_EQ(calls, 0); // clientSendT has not reached channel->sendRequestAsync.
+  pressure.clear();
+  {
+    auto request = serialize(); // Explicit caller retry while arguments live.
+    EXPECT_EQ(calls, 1);
+    ASSERT_TRUE(request.buffer);
+    EXPECT_TRUE(folly::UrmaInit::ownsPoolBuffer(*request.buffer));
+    BinaryProtocolReader reader;
+    reader.setInput(request.buffer.get());
+    std::string actual;
+    reader.readString(actual);
+    EXPECT_EQ(actual, body);
+  }
+  EXPECT_EQ(folly::UrmaInit::poolStats().allocated_bytes, 0);
+  auto failWriter = [&](BinaryProtocolWriter*) {
+    ++calls;
+    throw std::bad_alloc(); // An unrelated user/heap failure is never retried.
+  };
+  EXPECT_THROW((preprocessSendT(&protocol, options, nullptr, header, "pressure",
+      folly::FunctionRef<void(BinaryProtocolWriter*)>(failWriter),
+      folly::FunctionRef<size_t(BinaryProtocolWriter*)>(size), 0)), std::bad_alloc);
+  EXPECT_EQ(calls, 2);
+  EXPECT_EQ(folly::UrmaInit::poolStats().allocated_bytes, 0);
+  auto request = serialize();
+  EXPECT_EQ(calls, 3);
+  EXPECT_TRUE(request.buffer);
+}
+
 TEST(UrmaEgress, MemoryLimitClosesTheBusinessTransport) {
   auto* device = std::getenv("FBTHRIFT_URMA_TEST_DEVICE");
   if (!device || !*device) GTEST_SKIP() << "Set FBTHRIFT_URMA_TEST_DEVICE";

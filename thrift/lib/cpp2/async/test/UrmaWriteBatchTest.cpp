@@ -3,6 +3,7 @@
 #include <folly/io/Cursor.h>
 #include <folly/portability/GTest.h>
 #include <thrift/lib/cpp2/async/TAsyncTransportHandler.h>
+#include <thrift/lib/cpp2/async/Cpp2Channel.h>
 #include <wangle/channel/StaticPipeline.h>
 
 #ifdef FOLLY_HAVE_URMA
@@ -76,6 +77,51 @@ class UrmaWriteBatch : public testing::Test {
       pipeline->close();
   }
 };
+
+TEST(UrmaHeaderFailure, FramingAllocationFailsEachCallbackOnce) {
+  class Framing final : public FramingHandler {
+   public:
+    bool fail{false};
+    std::unique_ptr<folly::IOBuf> addFrame(
+        std::unique_ptr<folly::IOBuf> data, transport::THeader*) override {
+      if (fail) throw std::bad_alloc();
+      return data;
+    }
+    std::tuple<std::unique_ptr<folly::IOBuf>, size_t,
+               std::unique_ptr<transport::THeader>>
+    removeFrame(folly::IOBufQueue*) override { return {nullptr, 0, nullptr}; }
+  };
+  struct Callback : MessageChannel::SendCallback {
+    size_t sent{0}, failed{0};
+    bool allocationError{false};
+    void sendQueued() override {}
+    void messageSent() override { ++sent; }
+    void messageSendError(folly::exception_wrapper&& e) override {
+      ++failed;
+      allocationError = e.is_compatible_with<std::bad_alloc>();
+    }
+  } first, second;
+  folly::EventBase evb;
+  std::shared_ptr<RecordingTransport> transport(
+      new RecordingTransport(&evb), folly::DelayedDestruction::Destructor());
+  auto framing = std::make_unique<Framing>();
+  auto* fail = framing.get();
+  auto channel = Cpp2Channel::newChannel(transport, std::move(framing));
+  channel->sendMessage(&first, folly::IOBuf::copyBuffer("first"), nullptr);
+  fail->fail = true;
+  EXPECT_NO_THROW(channel->sendMessage(
+      &second, folly::IOBuf::copyBuffer("second"), nullptr));
+  for (int i = 0; i < 4; ++i) evb.loopOnce(EVLOOP_NONBLOCK);
+  EXPECT_EQ(first.failed, 1);
+  EXPECT_EQ(second.failed, 1);
+  EXPECT_TRUE(second.allocationError);
+  EXPECT_EQ(first.sent + second.sent, 0);
+  EXPECT_TRUE(transport->bytes.empty());
+  EXPECT_FALSE(transport->good());
+  channel.reset();
+  EXPECT_EQ(first.failed, 1);
+  EXPECT_EQ(second.failed, 1);
+}
 
 TEST_F(UrmaWriteBatch, QueuedBatchesMatchBytesWithoutStaleMetadata) {
   auto first = pipeline->write(folly::IOBuf::copyBuffer("abc"));

@@ -6,6 +6,10 @@ The default remains TCP. The listening TCP connection
 exchanges URMA endpoints; RPC payloads then pass through `UrmaAsyncSocket` and
 the usual Header/Rocket request processing code.
 
+TCP mode does not initialize URMA or enable registered IOBuf allocation; it
+keeps native allocation and growth. URMA mode enables the configured registered
+pool when its context initializes. This allocation setting is process-wide.
+
 Configure the server before `setup()` or `serve()`:
 
 ```cpp

@@ -59,6 +59,13 @@ TEST(UrmaServer, TcpRemainsTheDefault) {
   EXPECT_GT(running.getAddress()->getPort(), 0);
 #ifdef FOLLY_HAVE_URMA
   EXPECT_FALSE(folly::UrmaInit::isInitialized());
+  EXPECT_FALSE(folly::UrmaInit::poolIOBufAllocationEnabled());
+  auto buffer = folly::IOBuf::copyBuffer("tcp");
+  EXPECT_FALSE(folly::UrmaInit::ownsPoolBuffer(*buffer));
+  buffer->reserve(32, 8192);
+  EXPECT_FALSE(folly::UrmaInit::ownsPoolBuffer(*buffer));
+  EXPECT_EQ(buffer->length(), 3);
+  EXPECT_EQ(std::string(reinterpret_cast<const char*>(buffer->data()), 3), "tcp");
 #endif
 }
 
@@ -191,10 +198,21 @@ TEST(UrmaServerHardware, SharedContextOutlivesTheFirstServer) {
   auto one = std::make_unique<util::ScopedServerThread>(first);
   auto two = std::make_unique<util::ScopedServerThread>(second);
   EXPECT_TRUE(folly::UrmaInit::isInitialized());
+  EXPECT_TRUE(folly::UrmaInit::poolIOBufAllocationEnabled());
+  {
+    auto buffer = folly::IOBuf::copyBuffer("urma");
+    EXPECT_TRUE(folly::UrmaInit::ownsPoolBuffer(*buffer));
+    buffer->reserve(32, 8192);
+    EXPECT_TRUE(folly::UrmaInit::ownsPoolBuffer(*buffer));
+  }
   one.reset();
   EXPECT_TRUE(folly::UrmaInit::isInitialized());
+  EXPECT_TRUE(folly::UrmaInit::poolIOBufAllocationEnabled());
   two.reset();
   EXPECT_FALSE(folly::UrmaInit::isInitialized());
+  EXPECT_FALSE(folly::UrmaInit::poolIOBufAllocationEnabled());
+  auto native = folly::IOBuf::copyBuffer("tcp");
+  EXPECT_FALSE(folly::UrmaInit::ownsPoolBuffer(*native));
 }
 
 TEST(UrmaServerHardware, BorrowsAnApplicationContextWithoutFinalizingIt) {

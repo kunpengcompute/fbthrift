@@ -328,8 +328,9 @@ extern "C" urma_status_t urma_post_jfs_wr(urma_jfs_t* q, urma_jfs_wr_t* wr, urma
   if (result == URMA_SUCCESS) for (auto* p = wr; p; p = p->next) {
     if (p->opcode == URMA_OPC_READ)
       postedRead[{q->jfs_cfg.jfc, p->user_ctx}] = {p->rw.dst.sge[0].addr, p->rw.dst.sge[0].len, true};
-    if (p->opcode == URMA_OPC_SEND_IMM && p->send.src.sge[0].len == 40) {
+    if (p->opcode == URMA_OPC_SEND && p->send.src.sge[0].len == 40) {
       const auto* header = reinterpret_cast<const uint8_t*>(p->send.src.sge[0].addr);
+      if (header[6] != uint8_t(folly::urma_detail::PacketKind::Pull)) continue;
       // Four RX slots intentionally cause RNR; retries reuse the business ID.
       if (!observedPulls.emplace(folly::urma_detail::getInteger(header + 8, 8),
                                  folly::urma_detail::getInteger(header + 16, 8)).second)

@@ -21,6 +21,7 @@
 #include <folly/io/Cursor.h>
 #include <folly/io/async/DecoratedAsyncTransportWrapper.h>
 #ifdef FOLLY_HAVE_URMA
+#include <folly/io/async/HHWheelTimer.h>
 #include <folly/io/async/urma/UrmaProtocol.h>
 #include <folly/io/async/urma/UrmaRecordWriter.h>
 #endif
@@ -93,9 +94,10 @@ class CheckTLSPeekingManager : public PeekingManagerBase,
                                public wangle::SocketPeeker::Callback,
                                private folly::AsyncTransport::ReadCallback {
  public:
+  using Clock = std::chrono::steady_clock;
   using Upgrade = folly::Function<void(
       folly::AsyncSocket::UniquePtr, std::vector<uint8_t>,
-      const folly::SocketAddress&, const wangle::TransportInfo&)>;
+      const folly::SocketAddress&, const wangle::TransportInfo&, Clock::time_point)>;
   CheckTLSPeekingManager(
       std::shared_ptr<apache::thrift::Cpp2Worker> acceptor,
       const folly::SocketAddress& clientAddr,
@@ -110,17 +112,17 @@ class CheckTLSPeekingManager : public PeekingManagerBase,
         socket_(std::move(socket)),
         observer_(std::move(obs)),
         upgrade_(std::move(upgrade)) {
-    if (timeout.count()) {
-      acceptor_->getConnectionManager()->scheduleTimeout(this, timeout);
-    }
 #ifdef FOLLY_HAVE_URMA
     if (upgrade_) {
+      handshakeTimeout_ = timeout;
       // Read a complete HELLO when available, but dispatch a short TCP prefix
       // as soon as the ordinary plaintext peeker would.
       prefix_.resize(folly::urma_detail::kHelloSize);
       socket_->setReadCB(this);
       return;
     }
+#else
+    (void)timeout;
 #endif
     peeker_.reset(new wangle::SocketPeeker(*socket_, this, kPeekBytes));
     peeker_->start();
@@ -138,11 +140,13 @@ class CheckTLSPeekingManager : public PeekingManagerBase,
 #ifdef FOLLY_HAVE_URMA
       if (upgrade_ && peekBytes.size() >= 4 &&
           folly::urma_detail::load32(peekBytes.data()) == folly::urma_detail::kMagic) {
+        const auto started = partialTimeout_.isScheduled() ? handshakeStarted_ : Clock::now();
+        partialTimeout_.cancelTimeout();
         // Retire the detector and its timeout. The new reader takes over the
         // same socket on this EventBase with read interest still enabled.
         PeekingManagerBase::dropConnection();
         if (acceptor_->getConnectionManager() && !acceptor_->isStopping()) {
-          upgrade_(std::move(socket_), std::move(peekBytes), clientAddr_, tinfo_);
+          upgrade_(std::move(socket_), std::move(peekBytes), clientAddr_, tinfo_, started);
         } else {
           socket_->setReadCB(nullptr);
         }
@@ -201,6 +205,9 @@ class CheckTLSPeekingManager : public PeekingManagerBase,
 
   void dropConnection(const std::string& errorMsg = "") override {
     folly::DelayedDestruction::DestructorGuard dg(this);
+#ifdef FOLLY_HAVE_URMA
+    partialTimeout_.cancelTimeout();
+#endif
     if (socket_ && socket_->getReadCallback() == this) {
       socket_->setReadCB(nullptr);
     }
@@ -220,7 +227,21 @@ class CheckTLSPeekingManager : public PeekingManagerBase,
     if (received_ >= kPeekBytes) {
       prefix_.resize(received_);
       peekSuccess(std::move(prefix_));
+      return;
     }
+#ifdef FOLLY_HAVE_URMA
+    // A short prefix can still become ordinary TCP. Leave its idle timer intact.
+    uint8_t magic[sizeof(folly::urma_detail::kMagic)];
+    folly::urma_detail::store32(magic, folly::urma_detail::kMagic);
+    if (received_ && std::memcmp(prefix_.data(), magic, std::min(received_, sizeof(magic))) == 0) {
+      if (!partialTimeout_.isScheduled()) {
+        handshakeStarted_ = Clock::now();
+        socket_->getEventBase()->timer().scheduleTimeout(&partialTimeout_, handshakeTimeout_);
+      }
+    } else {
+      partialTimeout_.cancelTimeout();
+    }
+#endif
   }
   void readEOF() noexcept override { dropConnection(); }
   void readErr(const folly::AsyncSocketException&) noexcept override {
@@ -232,6 +253,15 @@ class CheckTLSPeekingManager : public PeekingManagerBase,
   wangle::SocketPeeker::UniquePtr peeker_;
   std::vector<uint8_t> prefix_;
   size_t received_{0};
+#ifdef FOLLY_HAVE_URMA
+  struct PartialHelloTimeout : folly::HHWheelTimer::Callback {
+    explicit PartialHelloTimeout(CheckTLSPeekingManager& owner) : owner_(owner) {}
+    void timeoutExpired() noexcept override { owner_.dropConnection(); }
+    CheckTLSPeekingManager& owner_;
+  } partialTimeout_{*this};
+  Clock::time_point handshakeStarted_{};
+  std::chrono::milliseconds handshakeTimeout_{0};
+#endif
 };
 
 /**

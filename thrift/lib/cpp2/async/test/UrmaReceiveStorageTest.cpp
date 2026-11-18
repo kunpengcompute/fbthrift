@@ -25,6 +25,7 @@
 #include <set>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -252,17 +253,21 @@ void exercise(bool useRocket, bool useRead, size_t bodyBytes = kBody) {
     pump(evb, [&] { return writes.done == kMessages && capture.count == kMessages; });
     check(!writes.errors && !rocketOwner.error && !rocketOwner.charged, "framework callback/error accounting");
     const auto tx = client->getUrmaStats(), rx = accepted.socket->getUrmaStats();
-    size_t readBytes = 0;
-    for (const auto& range : completed) if (range.read) readBytes += range.size;
+    const auto [readBytes, offerCount, payloadOfferCount, replacementCount] = [&] {
+      std::lock_guard<std::mutex> lock(traceMutex);
+      size_t bytes = 0;
+      for (const auto& range : completed) if (range.read) bytes += range.size;
+      return std::make_tuple(bytes, offers, payloadOffers, replacements);
+    }();
     // RX identity is checked against actual DMA addresses by Capture. Small
     // fragmented SEND frames may be coalesced; registered READ sources must
     // still match the original serializer allocations observed by the hook.
     check(!tx.copiedReadBytes && !rx.copiedReadBytes,
           "registered READ source took a staging copy");
-    check(useRead ? (payloadOffers == kMessages && rx.reads == offers &&
+    check(useRead ? (payloadOfferCount == kMessages && rx.reads == offerCount &&
                      tx.directReadBytes == readBytes)
-                  : (!offers && !rx.reads), "READ toggle or byte accounting mismatch");
-    check(replacements > config.rx_depth && !UrmaInit::poolStats().exported_bytes,
+                  : (!offerCount && !rx.reads), "READ toggle or byte accounting mismatch");
+    check(replacementCount > config.rx_depth && !UrmaInit::poolStats().exported_bytes,
           "RX slots did not refill or sources still exported after FREE");
     std::cout << (useRocket ? "Rocket" : "Header")
               << (useRead ? " READ" : " SEND") << " body_bytes=" << bodyBytes
@@ -270,7 +275,7 @@ void exercise(bool useRocket, bool useRead, size_t bodyBytes = kBody) {
               << " copied_send_bytes=" << tx.copiedSendBytes << '/' << rx.copiedSendBytes
               << " read_count=" << rx.reads
               << " read_bytes=" << tx.directReadBytes << '/' << readBytes
-              << " slot_replacements=" << replacements << '\n';
+              << " slot_replacements=" << replacementCount << '\n';
     capture.verifyRetained();
     accepted.socket->setReadCB(nullptr);
     pipeline.reset();

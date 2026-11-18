@@ -21,9 +21,9 @@ server->setUrmaConfig(config);
 ```
 
 An enabled server accepts ordinary TCP and URMA clients on the same plaintext
-port. It peeks the existing URMA magic, preserves the received prefix and bounds
-protocol detection by the handshake timeout. Recognized but incompatible URMA
-HELLOs are rejected; they are not reinterpreted as TCP traffic.
+port. Idle TCP connections and fragmented TCP frames follow the normal TCP idle
+timeout. The URMA handshake deadline starts with the first matching HELLO
+prefix and covers the entire handshake. The server rejects incompatible HELLOs.
 
 The server initializes URMA before listening and keeps its context alive until
 the last associated server transport is destroyed. Servers in the same process

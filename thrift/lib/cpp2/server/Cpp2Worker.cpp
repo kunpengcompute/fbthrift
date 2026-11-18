@@ -26,6 +26,9 @@
 #include <folly/io/async/AsyncSSLSocket.h>
 #include <folly/io/async/AsyncSocket.h>
 #include <folly/io/async/EventBaseLocal.h>
+#ifdef FOLLY_HAVE_URMA
+#include <folly/io/async/urma/UrmaInit.h>
+#endif
 #include <folly/portability/Sockets.h>
 #include <thrift/lib/cpp/async/TAsyncSSLSocket.h>
 #include <thrift/lib/cpp/concurrency/Util.h>
@@ -35,7 +38,6 @@
 #include <thrift/lib/cpp2/server/LoggingEvent.h>
 #include <thrift/lib/cpp2/server/ThriftServer.h>
 #include <thrift/lib/cpp2/server/detail/UrmaServerRuntime.h>
-#include <folly/io/async/urma/UrmaInit.h>
 #include <thrift/lib/cpp2/server/peeking/PeekingManager.h>
 #include <thrift/lib/thrift/gen-cpp2/RpcMetadata_types.h>
 #include <wangle/acceptor/EvbHandshakeHelper.h>
@@ -200,11 +202,11 @@ void Cpp2Worker::plaintextConnectionReady(
   std::chrono::milliseconds timeout{0};
 #ifdef FOLLY_HAVE_URMA
   if (server_->getUseUrma()) {
-    const auto started = std::chrono::steady_clock::now();
     timeout = std::chrono::milliseconds(folly::UrmaInit::getConfig().handshake_timeout_ms);
-    upgrade = [this, runtime = server_->urmaRuntime_, started](
+    upgrade = [this, runtime = server_->urmaRuntime_](
         folly::AsyncSocket::UniquePtr socket, std::vector<uint8_t> bytes,
-        const folly::SocketAddress& clientAddr, const wangle::TransportInfo& tinfo) {
+        const folly::SocketAddress& clientAddr, const wangle::TransportInfo& tinfo,
+        CheckTLSPeekingManager::Clock::time_point started) {
       auto transport = detail::makeUrmaServerTransport(
           std::move(socket), runtime, started, std::move(bytes));
       VLOG(1) << "Cpp2Worker: accepting URMA transport on "

@@ -347,7 +347,73 @@ TEST(UrmaServerHardware, StrictSslWithoutCredentialsDoesNotEnableTls) {
   EXPECT_FALSE(folly::UrmaInit::isInitialized());
 }
 
-TEST(UrmaServerHardware, MixedClientsAndBoundedProtocolDetection) {
+template <typename Predicate>
+bool waitFor(folly::EventBase& evb, Predicate ready) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+  while (!ready() && std::chrono::steady_clock::now() < deadline) {
+    evb.loopOnce(EVLOOP_NONBLOCK);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return ready();
+}
+
+std::unique_ptr<folly::IOBuf> makeProbeFrame() {
+  folly::IOBufQueue output(folly::IOBufQueue::cacheChainLength());
+  BinaryProtocolWriter writer;
+  writer.setOutput(&output);
+  writer.writeMessageBegin("probe", MessageType::T_ONEWAY, 1);
+  writer.writeStructBegin("args");
+  writer.writeFieldStop();
+  writer.writeStructEnd();
+  writer.writeMessageEnd();
+  transport::THeader header;
+  header.setProtocolId(protocol::T_BINARY_PROTOCOL);
+  transport::THeader::StringToStringMap headers;
+  auto frame = header.addHeader(output.move(), headers);
+  frame->coalesce();
+  return frame;
+}
+
+TEST(UrmaServerHardware, MixedTcpAndUrmaClients) {
+  const char* device = std::getenv("FBTHRIFT_URMA_TEST_DEVICE");
+  if (!device || !*device) GTEST_SKIP();
+  auto server = makeServer();
+  auto factory = std::make_shared<NoopFactory>();
+  server->setProcessorFactory(factory);
+  folly::UrmaConfig config;
+  config.dev_name = device;
+  server->setUseUrma(true);
+  server->setUrmaConfig(config);
+  {
+    util::ScopedServerThread running(server);
+    folly::EventBase evb;
+    auto tcp = folly::AsyncSocket::newSocket(&evb, *running.getAddress());
+    auto urma = folly::UrmaAsyncSocket::newSocket(&evb, *running.getAddress());
+    ASSERT_TRUE(waitFor(evb, [&] {
+      return static_cast<folly::UrmaAsyncSocket*>(urma.get())->isUrmaReady();
+    }));
+    auto frame = makeProbeFrame();
+    // An incomplete prefix must not be consumed or misclassified.
+    tcp->write(nullptr, frame->data(), 2);
+    for (int i = 0; i < 5; ++i) evb.loopOnce(EVLOOP_NONBLOCK);
+    EXPECT_EQ(factory->calls->load(), 0);
+    urma->writeChain(nullptr, frame->clone());
+    ASSERT_TRUE(waitFor(evb, [&] { return factory->calls->load() == 1; }));
+    tcp->write(nullptr, frame->data() + 2, frame->length() - 2);
+    ASSERT_TRUE(waitFor(evb, [&] { return factory->calls->load() == 2; }));
+    // A mixed listener can read past the first TCP frame while identifying
+    // the protocol. Both frames must reach the Header transport.
+    auto pipelined = folly::AsyncSocket::newSocket(&evb, *running.getAddress());
+    frame->appendToChain(frame->clone());
+    pipelined->writeChain(nullptr, std::move(frame));
+    ASSERT_TRUE(waitFor(evb, [&] { return factory->calls->load() == 4; }));
+    tcp->closeNow();
+    urma->closeNow();
+  }
+  EXPECT_FALSE(folly::UrmaInit::isInitialized());
+}
+
+TEST(UrmaServerHardware, HandshakeDeadlineOnlyAppliesToUrmaPrefixes) {
   const char* device = std::getenv("FBTHRIFT_URMA_TEST_DEVICE");
   if (!device || !*device) GTEST_SKIP();
   auto server = makeServer();
@@ -361,46 +427,10 @@ TEST(UrmaServerHardware, MixedClientsAndBoundedProtocolDetection) {
   {
     util::ScopedServerThread running(server);
     folly::EventBase evb;
-    auto wait = [&](auto ready) {
-      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
-      while (!ready() && std::chrono::steady_clock::now() < deadline) {
-        evb.loopOnce(EVLOOP_NONBLOCK);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
-      return ready();
-    };
-    auto tcp = folly::AsyncSocket::newSocket(&evb, *running.getAddress());
-    auto urma = folly::UrmaAsyncSocket::newSocket(&evb, *running.getAddress());
-    ASSERT_TRUE(wait([&] {
-      return static_cast<folly::UrmaAsyncSocket*>(urma.get())->isUrmaReady();
-    }));
-    folly::IOBufQueue output(folly::IOBufQueue::cacheChainLength());
-    BinaryProtocolWriter writer;
-    writer.setOutput(&output);
-    writer.writeMessageBegin("probe", MessageType::T_ONEWAY, 1);
-    writer.writeStructBegin("args");
-    writer.writeFieldStop();
-    writer.writeStructEnd();
-    writer.writeMessageEnd();
-    transport::THeader header;
-    header.setProtocolId(protocol::T_BINARY_PROTOCOL);
-    transport::THeader::StringToStringMap headers;
-    auto frame = header.addHeader(output.move(), headers);
-    frame->coalesce();
-    // An incomplete prefix must not be consumed or misclassified.
-    tcp->write(nullptr, frame->data(), 2);
-    for (int i = 0; i < 5; ++i) evb.loopOnce(EVLOOP_NONBLOCK);
-    EXPECT_EQ(factory->calls->load(), 0);
-    urma->writeChain(nullptr, frame->clone());
-    ASSERT_TRUE(wait([&] { return factory->calls->load() == 1; }));
-    tcp->write(nullptr, frame->data() + 2, frame->length() - 2);
-    ASSERT_TRUE(wait([&] { return factory->calls->load() == 2; }));
-    // A mixed listener can read past the first TCP frame while identifying
-    // the protocol. Both frames must reach the Header transport.
-    auto pipelined = folly::AsyncSocket::newSocket(&evb, *running.getAddress());
-    frame->appendToChain(frame->clone());
-    pipelined->writeChain(nullptr, std::move(frame));
-    ASSERT_TRUE(wait([&] { return factory->calls->load() == 4; }));
+    auto idle = folly::AsyncSocket::newSocket(&evb, *running.getAddress());
+    auto partial = folly::AsyncSocket::newSocket(&evb, *running.getAddress());
+    auto frame = makeProbeFrame();
+    partial->write(nullptr, frame->data(), 2);
     struct Reader : folly::AsyncTransport::ReadCallback {
       char bytes[128]{};
       bool closed{false};
@@ -415,12 +445,15 @@ TEST(UrmaServerHardware, MixedClientsAndBoundedProtocolDetection) {
       bad->setReadCB(&reader);
       const uint8_t prefix[13] = {'U', 'R', 'M', 'A', 0, 102, 0, 2, 0, 1, 0, 0, 0};
       bad->write(nullptr, prefix, incompatible ? sizeof(prefix) : 2);
-      EXPECT_TRUE(wait([&] { return reader.closed; }));
+      ASSERT_TRUE(waitFor(evb, [&] { return reader.closed; }));
       bad->setReadCB(nullptr);
       bad->closeNow();
     }
-    tcp->closeNow();
-    urma->closeNow();
+    // The truncated URMA prefix timed out. Both pre-existing TCP clients
+    // must still be able to deliver their original frames.
+    idle->writeChain(nullptr, frame->clone());
+    partial->write(nullptr, frame->data() + 2, frame->length() - 2);
+    ASSERT_TRUE(waitFor(evb, [&] { return factory->calls->load() == 2; }));
   }
   EXPECT_FALSE(folly::UrmaInit::isInitialized());
 }

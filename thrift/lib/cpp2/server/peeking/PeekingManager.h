@@ -179,8 +179,7 @@ class PreReceivedDataAsyncTransportWrapper
   using UniquePtr = std::unique_ptr<AsyncTransport, Destructor>;
 #ifdef FOLLY_HAVE_URMA
   bool supportsUrmaRecords() const override {
-    auto* writer = dynamic_cast<const folly::UrmaRecordWriter*>(transport_.get());
-    return writer && writer->supportsUrmaRecords();
+    return urmaWriter_ && urmaWriter_->supportsUrmaRecords();
   }
   void writeChainWithRecords(
       folly::AsyncTransport::WriteCallback* callback,
@@ -188,9 +187,8 @@ class PreReceivedDataAsyncTransportWrapper
       std::vector<size_t> lengths,
       folly::WriteFlags flags = folly::WriteFlags::NONE) noexcept override {
     // This wrapper only replays reads; its write path is transparent.
-    auto* writer = dynamic_cast<folly::UrmaRecordWriter*>(transport_.get());
-    if (writer && writer->supportsUrmaRecords()) {
-      writer->writeChainWithRecords(
+    if (supportsUrmaRecords()) {
+      urmaWriter_->writeChainWithRecords(
           callback, std::move(data), std::move(lengths), flags);
     } else {
       transport_->writeChain(callback, std::move(data), flags);
@@ -350,6 +348,11 @@ class PreReceivedDataAsyncTransportWrapper
 
   std::unique_ptr<std::vector<uint8_t>> preReceivedData_;
   folly::AsyncTransport::ReadCallback* readCallback_{};
+#ifdef FOLLY_HAVE_URMA
+  // The underlying transport is owned by Base and is never replaced.
+  folly::UrmaRecordWriter* const urmaWriter_{
+      dynamic_cast<folly::UrmaRecordWriter*>(transport_.get())};
+#endif
 };
 
 class TransportPeekingManager : public PeekingManagerBase,

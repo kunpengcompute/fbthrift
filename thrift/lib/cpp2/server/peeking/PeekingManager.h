@@ -17,9 +17,11 @@
 #pragma once
 
 #include <folly/ExceptionString.h>
+#include <folly/Function.h>
 #include <folly/io/Cursor.h>
 #include <folly/io/async/DecoratedAsyncTransportWrapper.h>
 #ifdef FOLLY_HAVE_URMA
+#include <folly/io/async/urma/UrmaProtocol.h>
 #include <folly/io/async/urma/UrmaRecordWriter.h>
 #endif
 #include <thrift/lib/cpp/server/TServerObserver.h>
@@ -88,20 +90,39 @@ class PeekingManagerBase : public wangle::ManagedConnection {
 };
 
 class CheckTLSPeekingManager : public PeekingManagerBase,
-                               public wangle::SocketPeeker::Callback {
+                               public wangle::SocketPeeker::Callback,
+                               private folly::AsyncTransport::ReadCallback {
  public:
+  using Upgrade = folly::Function<void(
+      folly::AsyncSocket::UniquePtr, std::vector<uint8_t>,
+      const folly::SocketAddress&, const wangle::TransportInfo&)>;
   CheckTLSPeekingManager(
       std::shared_ptr<apache::thrift::Cpp2Worker> acceptor,
       const folly::SocketAddress& clientAddr,
       wangle::TransportInfo tinfo,
       apache::thrift::ThriftServer* server,
       folly::AsyncSocket::UniquePtr socket,
-      std::shared_ptr<apache::thrift::server::TServerObserver> obs)
+      std::shared_ptr<apache::thrift::server::TServerObserver> obs,
+      Upgrade upgrade = nullptr,
+      std::chrono::milliseconds timeout = std::chrono::milliseconds(0))
       : PeekingManagerBase(
             std::move(acceptor), clientAddr, std::move(tinfo), server),
         socket_(std::move(socket)),
         observer_(std::move(obs)),
-        peeker_(new wangle::SocketPeeker(*socket_, this, kPeekBytes)) {
+        upgrade_(std::move(upgrade)) {
+    if (timeout.count()) {
+      acceptor_->getConnectionManager()->scheduleTimeout(this, timeout);
+    }
+#ifdef FOLLY_HAVE_URMA
+    if (upgrade_) {
+      // Read a complete HELLO when available, but dispatch a short TCP prefix
+      // as soon as the ordinary plaintext peeker would.
+      prefix_.resize(folly::urma_detail::kHelloSize);
+      socket_->setReadCB(this);
+      return;
+    }
+#endif
+    peeker_.reset(new wangle::SocketPeeker(*socket_, this, kPeekBytes));
     peeker_->start();
   }
 
@@ -113,7 +134,43 @@ class CheckTLSPeekingManager : public PeekingManagerBase,
 
   void peekSuccess(std::vector<uint8_t> peekBytes) noexcept override {
     folly::DelayedDestruction::DestructorGuard dg(this);
-    dropConnection();
+    try {
+#ifdef FOLLY_HAVE_URMA
+      if (upgrade_ && peekBytes.size() >= 4 &&
+          folly::urma_detail::load32(peekBytes.data()) == folly::urma_detail::kMagic) {
+        // Retire the detector and its timeout. The new reader takes over the
+        // same socket on this EventBase with read interest still enabled.
+        PeekingManagerBase::dropConnection();
+        if (acceptor_->getConnectionManager() && !acceptor_->isStopping()) {
+          upgrade_(std::move(socket_), std::move(peekBytes), clientAddr_, tinfo_);
+        } else {
+          socket_->setReadCB(nullptr);
+        }
+        return;
+      }
+#endif
+      dropConnection();
+      if (acceptor_->isStopping() || !acceptor_->getConnectionManager()) {
+        return;
+      }
+      if (upgrade_) {
+        // Negotiation storage must survive registered-pool pressure. The
+        // ordinary SocketPeeker uses IOBuf::copyBuffer in a noexcept callback.
+        auto bytes = std::make_unique<uint8_t[]>(peekBytes.size());
+        std::memcpy(bytes.get(), peekBytes.data(), peekBytes.size());
+        auto prefix = folly::IOBuf::takeOwnership(
+            bytes.release(), peekBytes.size(),
+            [](void* p, void*) { delete[] static_cast<uint8_t*>(p); });
+        if (auto tail = socket_->takePreReceivedData()) {
+          prefix->appendToChain(std::move(tail));
+        }
+        socket_->setPreReceivedData(std::move(prefix));
+      }
+    } catch (...) {
+      LOG(ERROR) << "Transport negotiation failed: "
+                 << folly::exceptionStr(std::current_exception());
+      return;
+    }
     if (TLSHelper::looksLikeTLS(peekBytes)) {
       LOG(ERROR) << "Received SSL connection on non SSL port";
       sendPlaintextTLSAlert(peekBytes);
@@ -144,14 +201,37 @@ class CheckTLSPeekingManager : public PeekingManagerBase,
 
   void dropConnection(const std::string& errorMsg = "") override {
     folly::DelayedDestruction::DestructorGuard dg(this);
+    if (socket_ && socket_->getReadCallback() == this) {
+      socket_->setReadCB(nullptr);
+    }
     peeker_ = nullptr;
-    PeekingManagerBase::dropConnection(errorMsg);
+    if (!getDestroyPending()) {
+      PeekingManagerBase::dropConnection(errorMsg);
+    }
   }
 
  private:
+  void getReadBuffer(void** buf, size_t* size) override {
+    *buf = prefix_.data() + received_;
+    *size = prefix_.size() - received_;
+  }
+  void readDataAvailable(size_t n) noexcept override {
+    received_ += n;
+    if (received_ >= kPeekBytes) {
+      prefix_.resize(received_);
+      peekSuccess(std::move(prefix_));
+    }
+  }
+  void readEOF() noexcept override { dropConnection(); }
+  void readErr(const folly::AsyncSocketException&) noexcept override {
+    dropConnection();
+  }
   folly::AsyncSocket::UniquePtr socket_;
   std::shared_ptr<apache::thrift::server::TServerObserver> observer_;
-  typename wangle::SocketPeeker::UniquePtr peeker_;
+  Upgrade upgrade_;
+  wangle::SocketPeeker::UniquePtr peeker_;
+  std::vector<uint8_t> prefix_;
+  size_t received_{0};
 };
 
 /**

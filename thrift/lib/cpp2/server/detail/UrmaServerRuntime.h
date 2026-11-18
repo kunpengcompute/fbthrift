@@ -3,6 +3,7 @@
 
 #ifdef FOLLY_HAVE_URMA
 #include <memory>
+#include <vector>
 #include <folly/io/async/AsyncSocket.h>
 #include <folly/io/async/urma/UrmaConfig.h>
 
@@ -21,7 +22,14 @@ class UrmaServerRuntime {
 
 folly::AsyncTransport::UniquePtr makeUrmaServerTransport(
     folly::AsyncSocket::UniquePtr socket,
-    std::shared_ptr<UrmaServerRuntime> runtime);
+    std::shared_ptr<UrmaServerRuntime> runtime,
+    std::chrono::steady_clock::time_point handshakeStarted =
+        std::chrono::steady_clock::now());
+folly::AsyncTransport::UniquePtr makeUrmaServerTransport(
+    folly::AsyncSocket::UniquePtr socket,
+    std::shared_ptr<UrmaServerRuntime> runtime,
+    std::chrono::steady_clock::time_point handshakeStarted,
+    std::vector<uint8_t> helloPrefix);
 
 } // namespace apache::thrift::detail
 #endif

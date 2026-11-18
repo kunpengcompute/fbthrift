@@ -20,9 +20,16 @@ server->setUseUrma(true);
 server->setUrmaConfig(config);
 ```
 
+An enabled server accepts ordinary TCP and URMA clients on the same plaintext
+port. It peeks the existing URMA magic, preserves the received prefix and bounds
+protocol detection by the handshake timeout. Recognized but incompatible URMA
+HELLOs are rejected; they are not reinterpreted as TCP traffic.
+
 The server initializes URMA before listening and keeps its context alive until
 the last associated server transport is destroyed. Servers in the same process
-must request the same configuration. If the application has already initialized
+must request the same configuration. In this mixed process, TCP IOBufs also use
+the registered pool: TCP is protocol-compatible but not isolated from URMA pool
+exhaustion. A TCP-only process that never initializes URMA keeps native allocation. If the application has already initialized
 Folly URMA, pass its effective `UrmaInit::getConfig()`; that context is borrowed
 and remains the application's responsibility to finalize.
 
@@ -54,9 +61,10 @@ SEND data is coalesced into registered storage before submission.
 For the existing benchmark, leave `dev_name` empty for TCP; pass
 `--dev_name=udmac0d1e2 --use_io_uring=false` to both endpoints for URMA. The
 benchmark's request scheduling, rate limiting and latency statistics are
-unchanged. The compatible Folly default permits up to 128 MiB of pending data
-per connection without preallocating that amount, covering ten outstanding
-8 MiB requests plus framing.
+unchanged. The Folly default bounds pending data and retained capacity at
+128 MiB per connection without preallocating it. This application admission
+limit must accommodate one complete write including framing; the shared pool
+separately bounds aggregate registered memory across connections.
 
 This transport has no TLS, duplex-channel or custom-acceptor integration and
 cannot be wrapped as an io_uring socket. Conflicting configurations fail at
@@ -92,6 +100,15 @@ Hardware lifecycle cases require the opt-in environment variable
 borrowing an application context, conflicting configurations, bind failure,
 strictSSL without credentials, and shutdown of an accepted negotiation socket.
 Without that variable, hardware cases are explicitly skipped.
+
+To test TCP and URMA clients on one URMA-enabled server port, run the focused
+case with the local device name:
+
+```bash
+FBTHRIFT_URMA_TEST_DEVICE=udmac1d1e2 \
+  GTEST_FILTER=UrmaServerHardware.MixedClientsAndBoundedProtocolDetection \
+  ctest --test-dir _build -R '^UrmaServerTest$' --output-on-failure
+```
 
 `UrmaReceiveStorageTest` observes actual SDK post addresses and completions on
 a local URMA connection. It checks Header and Rocket with READ enabled and

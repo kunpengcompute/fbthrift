@@ -81,9 +81,12 @@ class ServerUrmaSocket final : private RuntimeOwner,
  public:
   ServerUrmaSocket(
       folly::AsyncSocket::UniquePtr socket,
-      std::shared_ptr<UrmaServerRuntime> runtime)
+      std::shared_ptr<UrmaServerRuntime> runtime,
+      std::chrono::steady_clock::time_point handshakeStarted,
+      std::vector<uint8_t> helloPrefix)
       : RuntimeOwner(std::move(runtime)),
-        folly::UrmaAsyncSocket(std::move(socket)) {}
+        folly::UrmaAsyncSocket(
+            std::move(socket), handshakeStarted, std::move(helloPrefix)) {}
 };
 } // namespace
 
@@ -142,9 +145,20 @@ UrmaServerRuntime::~UrmaServerRuntime() {
 
 folly::AsyncTransport::UniquePtr makeUrmaServerTransport(
     folly::AsyncSocket::UniquePtr socket,
-    std::shared_ptr<UrmaServerRuntime> runtime) {
+    std::shared_ptr<UrmaServerRuntime> runtime,
+    std::chrono::steady_clock::time_point handshakeStarted) {
+  return makeUrmaServerTransport(
+      std::move(socket), std::move(runtime), handshakeStarted, {});
+}
+
+folly::AsyncTransport::UniquePtr makeUrmaServerTransport(
+    folly::AsyncSocket::UniquePtr socket,
+    std::shared_ptr<UrmaServerRuntime> runtime,
+    std::chrono::steady_clock::time_point handshakeStarted,
+    std::vector<uint8_t> helloPrefix) {
   return folly::AsyncTransport::UniquePtr(
-      new ServerUrmaSocket(std::move(socket), std::move(runtime)));
+      new ServerUrmaSocket(std::move(socket), std::move(runtime), handshakeStarted,
+                           std::move(helloPrefix)));
 }
 } // namespace apache::thrift::detail
 #endif

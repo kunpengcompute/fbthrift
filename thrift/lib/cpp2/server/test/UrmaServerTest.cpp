@@ -1,5 +1,6 @@
 /* Copyright (c) Huawei Technologies Co., Ltd. 2026. Licensed under Apache-2.0.
  */
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
@@ -14,6 +15,8 @@
 #include <folly/portability/GTest.h>
 #include <folly/portability/Sockets.h>
 #include <thrift/lib/cpp2/server/ThriftServer.h>
+#include <thrift/lib/cpp/transport/THeader.h>
+#include <thrift/lib/cpp2/protocol/BinaryProtocol.h>
 #include <thrift/lib/cpp2/util/ScopedServerThread.h>
 #ifdef FOLLY_HAVE_URMA
 #include <folly/io/async/urma/UrmaInit.h>
@@ -25,6 +28,7 @@ namespace apache::thrift {
 namespace {
 class NoopProcessor : public AsyncProcessor {
  public:
+  explicit NoopProcessor(std::shared_ptr<std::atomic<size_t>> calls) : calls_(std::move(calls)) {}
   void processSerializedCompressedRequestWithMetadata(
       ResponseChannelRequest::UniquePtr,
       SerializedCompressedRequest&&,
@@ -32,13 +36,16 @@ class NoopProcessor : public AsyncProcessor {
       protocol::PROTOCOL_TYPES,
       Cpp2RequestContext*,
       folly::EventBase*,
-      concurrency::ThreadManager*) override {}
+      concurrency::ThreadManager*) override { ++*calls_; }
+ private:
+  std::shared_ptr<std::atomic<size_t>> calls_;
 };
 
 class NoopFactory : public AsyncProcessorFactory {
  public:
+  std::shared_ptr<std::atomic<size_t>> calls = std::make_shared<std::atomic<size_t>>(0);
   std::unique_ptr<AsyncProcessor> getProcessor() override {
-    return std::make_unique<NoopProcessor>();
+    return std::make_unique<NoopProcessor>(calls);
   }
   std::vector<ServiceHandlerBase*> getServiceHandlers() override { return {}; }
 };
@@ -336,6 +343,84 @@ TEST(UrmaServerHardware, StrictSslWithoutCredentialsDoesNotEnableTls) {
     util::ScopedServerThread running(server);
     EXPECT_GT(running.getAddress()->getPort(), 0);
     EXPECT_TRUE(folly::UrmaInit::isInitialized());
+  }
+  EXPECT_FALSE(folly::UrmaInit::isInitialized());
+}
+
+TEST(UrmaServerHardware, MixedClientsAndBoundedProtocolDetection) {
+  const char* device = std::getenv("FBTHRIFT_URMA_TEST_DEVICE");
+  if (!device || !*device) GTEST_SKIP();
+  auto server = makeServer();
+  auto factory = std::make_shared<NoopFactory>();
+  server->setProcessorFactory(factory);
+  folly::UrmaConfig config;
+  config.dev_name = device;
+  config.handshake_timeout_ms = 500;
+  server->setUseUrma(true);
+  server->setUrmaConfig(config);
+  {
+    util::ScopedServerThread running(server);
+    folly::EventBase evb;
+    auto wait = [&](auto ready) {
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+      while (!ready() && std::chrono::steady_clock::now() < deadline) {
+        evb.loopOnce(EVLOOP_NONBLOCK);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      return ready();
+    };
+    auto tcp = folly::AsyncSocket::newSocket(&evb, *running.getAddress());
+    auto urma = folly::UrmaAsyncSocket::newSocket(&evb, *running.getAddress());
+    ASSERT_TRUE(wait([&] {
+      return static_cast<folly::UrmaAsyncSocket*>(urma.get())->isUrmaReady();
+    }));
+    folly::IOBufQueue output(folly::IOBufQueue::cacheChainLength());
+    BinaryProtocolWriter writer;
+    writer.setOutput(&output);
+    writer.writeMessageBegin("probe", MessageType::T_ONEWAY, 1);
+    writer.writeStructBegin("args");
+    writer.writeFieldStop();
+    writer.writeStructEnd();
+    writer.writeMessageEnd();
+    transport::THeader header;
+    header.setProtocolId(protocol::T_BINARY_PROTOCOL);
+    transport::THeader::StringToStringMap headers;
+    auto frame = header.addHeader(output.move(), headers);
+    frame->coalesce();
+    // An incomplete prefix must not be consumed or misclassified.
+    tcp->write(nullptr, frame->data(), 2);
+    for (int i = 0; i < 5; ++i) evb.loopOnce(EVLOOP_NONBLOCK);
+    EXPECT_EQ(factory->calls->load(), 0);
+    urma->writeChain(nullptr, frame->clone());
+    ASSERT_TRUE(wait([&] { return factory->calls->load() == 1; }));
+    tcp->write(nullptr, frame->data() + 2, frame->length() - 2);
+    ASSERT_TRUE(wait([&] { return factory->calls->load() == 2; }));
+    // A mixed listener can read past the first TCP frame while identifying
+    // the protocol. Both frames must reach the Header transport.
+    auto pipelined = folly::AsyncSocket::newSocket(&evb, *running.getAddress());
+    frame->appendToChain(frame->clone());
+    pipelined->writeChain(nullptr, std::move(frame));
+    ASSERT_TRUE(wait([&] { return factory->calls->load() == 4; }));
+    struct Reader : folly::AsyncTransport::ReadCallback {
+      char bytes[128]{};
+      bool closed{false};
+      void getReadBuffer(void** p, size_t* n) override { *p = bytes; *n = sizeof(bytes); }
+      void readDataAvailable(size_t) noexcept override {}
+      void readEOF() noexcept override { closed = true; }
+      void readErr(const folly::AsyncSocketException&) noexcept override { closed = true; }
+    } reader;
+    for (bool incompatible : {false, true}) {
+      reader.closed = false;
+      auto bad = folly::AsyncSocket::newSocket(&evb, *running.getAddress());
+      bad->setReadCB(&reader);
+      const uint8_t prefix[13] = {'U', 'R', 'M', 'A', 0, 102, 0, 2, 0, 1, 0, 0, 0};
+      bad->write(nullptr, prefix, incompatible ? sizeof(prefix) : 2);
+      EXPECT_TRUE(wait([&] { return reader.closed; }));
+      bad->setReadCB(nullptr);
+      bad->closeNow();
+    }
+    tcp->closeNow();
+    urma->closeNow();
   }
   EXPECT_FALSE(folly::UrmaInit::isInitialized());
 }

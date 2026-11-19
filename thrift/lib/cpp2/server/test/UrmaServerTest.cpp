@@ -439,12 +439,13 @@ TEST(UrmaServerHardware, HandshakeDeadlineOnlyAppliesToUrmaPrefixes) {
       void readEOF() noexcept override { closed = true; }
       void readErr(const folly::AsyncSocketException&) noexcept override { closed = true; }
     } reader;
-    for (bool incompatible : {false, true}) {
+    for (auto versions : {std::make_pair(1, 1), std::make_pair(2, 1), std::make_pair(1, 2)}) {
       reader.closed = false;
       auto bad = folly::AsyncSocket::newSocket(&evb, *running.getAddress());
       bad->setReadCB(&reader);
-      const uint8_t prefix[13] = {'U', 'R', 'M', 'A', 0, 102, 0, 2, 0, 1, 0, 0, 0};
-      bad->write(nullptr, prefix, incompatible ? sizeof(prefix) : 2);
+      const uint8_t prefix[13] = {
+          'U', 'R', 'M', 'A', 0, 75, 0, uint8_t(versions.first), 0, uint8_t(versions.second)};
+      bad->write(nullptr, prefix, versions.first == 1 && versions.second == 1 ? 2 : sizeof(prefix));
       ASSERT_TRUE(waitFor(evb, [&] { return reader.closed; }));
       bad->setReadCB(nullptr);
       bad->closeNow();

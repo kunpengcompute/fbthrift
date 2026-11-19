@@ -36,7 +36,9 @@ class TAsyncTransportHandler : public wangle::BytesToBytesHandler,
   explicit TAsyncTransportHandler(
       std::shared_ptr<folly::AsyncTransport> transport,
       std::shared_ptr<detail::UrmaWriteBatchState> batchState = nullptr)
-      : transport_(std::move(transport)), batchState_(std::move(batchState)) {}
+      : batchState_(std::move(batchState)) {
+    setTransport(transport);
+  }
 
   TAsyncTransportHandler(TAsyncTransportHandler&&) = default;
 
@@ -47,6 +49,10 @@ class TAsyncTransportHandler : public wangle::BytesToBytesHandler,
   }
 
   void setTransport(const std::shared_ptr<folly::AsyncTransport>& transport) {
+#ifdef FOLLY_HAVE_URMA
+    // Releasing the old transport can invoke callbacks using its replacement.
+    urmaWriter_ = dynamic_cast<folly::UrmaRecordWriter*>(transport.get());
+#endif
     transport_ = transport;
   }
 
@@ -92,12 +98,16 @@ class TAsyncTransportHandler : public wangle::BytesToBytesHandler,
     auto cb = new WriteCallback();
     auto future = cb->promise_.getFuture();
     if (batchState_) {
-      detail::writeWithUrmaRecords(
-          transport_.get(), cb, std::move(buf),
-          std::exchange(batchState_->flushing, {}), ctx->getWriteFlags());
-    } else {
-      transport_->writeChain(cb, std::move(buf), ctx->getWriteFlags());
+      auto lengths = std::exchange(batchState_->flushing, {});
+#ifdef FOLLY_HAVE_URMA
+      if (urmaWriter_ && urmaWriter_->supportsUrmaRecords()) {
+        urmaWriter_->writeChainWithRecords(
+            cb, std::move(buf), std::move(lengths), ctx->getWriteFlags());
+        return future;
+      }
+#endif
     }
+    transport_->writeChain(cb, std::move(buf), ctx->getWriteFlags());
     return future;
   }
 
@@ -177,6 +187,10 @@ class TAsyncTransportHandler : public wangle::BytesToBytesHandler,
   folly::IOBufQueue bufQueue_{folly::IOBufQueue::cacheChainLength()};
   std::shared_ptr<folly::AsyncTransport> transport_;
   std::shared_ptr<detail::UrmaWriteBatchState> batchState_;
+#ifdef FOLLY_HAVE_URMA
+  // Owned by transport_; refreshed on replacement, never unwraps a transport.
+  folly::UrmaRecordWriter* urmaWriter_{nullptr};
+#endif
 };
 
 } // namespace thrift

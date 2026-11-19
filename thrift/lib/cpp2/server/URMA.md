@@ -6,6 +6,10 @@ The default remains TCP. The listening TCP connection
 exchanges URMA endpoints; RPC payloads then pass through `UrmaAsyncSocket` and
 the usual Header/Rocket request processing code.
 
+TCP mode does not initialize URMA or enable registered IOBuf allocation; it
+keeps native allocation and growth. URMA mode enables the configured registered
+pool when its context initializes. This allocation setting is process-wide.
+
 Configure the server before `setup()` or `serve()`:
 
 ```cpp
@@ -16,22 +20,22 @@ server->setUseUrma(true);
 server->setUrmaConfig(config);
 ```
 
+An enabled server accepts ordinary TCP and URMA clients on the same plaintext
+port. Idle TCP connections and fragmented TCP frames follow the normal TCP idle
+timeout. The URMA handshake deadline starts with the first matching HELLO
+prefix and covers the entire handshake. The server rejects incompatible HELLOs.
+
 The server initializes URMA before listening and keeps its context alive until
 the last associated server transport is destroyed. Servers in the same process
-must request the same configuration. If the application has already initialized
+must request the same configuration. In this mixed process, TCP IOBufs also use
+the registered pool: TCP is protocol-compatible but not isolated from URMA pool
+exhaustion. A TCP-only process that never initializes URMA keeps native allocation. If the application has already initialized
 Folly URMA, pass its effective `UrmaInit::getConfig()`; that context is borrowed
 and remains the application's responsibility to finalize.
 
-Use the matching Folly implementation with per-connection URMA queues, including
-`UrmaAsyncSocket::newSocket(EventBase*, const SocketAddress&)` and the owning
-`UrmaAsyncSocket(AsyncSocket::UniquePtr)` constructor, `UrmaRecordWriter`,
-`UrmaConfig::enable_read` / `read_threshold`, context acquire/release, and
-the transport buffer callback and statistics. The earlier socket-compatibility
-revision alone does not provide these APIs. Build Folly with
-`FOLLY_USE_URMA=ON`, install fbthrift against that installation, and rebuild the
-existing benchmark against the same headers and libraries. The original
-benchmark service and client source files do not need modification; no
-benchmark-side compatibility patch is needed.
+Build Folly with `FOLLY_USE_URMA=ON`, then build fbthrift and the application
+against the same installation. Each EventBase shares one JFS/JFR pair;
+`rx_target` controls preposted receive buffers.
 
 ## Receive storage and copy boundaries
 
@@ -49,21 +53,18 @@ last reference is released, including after socket close or on another thread.
 Deserializing into `std::string` copies the field. Initial protocol detection
 uses a conventional read callback and copies its small prefix. Compression,
 explicit coalescing, pool-external inputs and nonmovable callbacks also lie
-outside the transport body zero-copy guarantee. The Folly
-`copied_read_target_bytes` counter includes conventional receive-callback
-copies for both SEND and READ; it is not specific to READ bodies.
+outside the transport body zero-copy guarantee.
 
-Registered SEND chains that exceed one WR's SGE capacity must be sent in
-ordered prefixes instead of copied for coalescing. Both endpoints must have
-enough SGEs for an independent header plus registered data to meet an all-SEND
-zero-copy requirement. The one-SGE compatibility fallback can copy.
+A single registered SEND buffer can reuse exclusive header space. Fragmented
+SEND data is coalesced into registered storage before submission.
 
 For the existing benchmark, leave `dev_name` empty for TCP; pass
 `--dev_name=udmac0d1e2 --use_io_uring=false` to both endpoints for URMA. The
 benchmark's request scheduling, rate limiting and latency statistics are
-unchanged. The compatible Folly default permits up to 128 MiB of pending data
-per connection without preallocating that amount, covering ten outstanding
-8 MiB requests plus framing.
+unchanged. The Folly default bounds pending data and retained capacity at
+128 MiB per connection without preallocating it. This application admission
+limit must accommodate one complete write including framing; the shared pool
+separately bounds aggregate registered memory across connections.
 
 This transport has no TLS, duplex-channel or custom-acceptor integration and
 cannot be wrapped as an io_uring socket. Conflicting configurations fail at
@@ -99,6 +100,15 @@ Hardware lifecycle cases require the opt-in environment variable
 borrowing an application context, conflicting configurations, bind failure,
 strictSSL without credentials, and shutdown of an accepted negotiation socket.
 Without that variable, hardware cases are explicitly skipped.
+
+To test TCP and URMA clients on one URMA-enabled server port, run the focused
+case with the local device name:
+
+```bash
+FBTHRIFT_URMA_TEST_DEVICE=udmac1d1e2 \
+  GTEST_FILTER=UrmaServerHardware.MixedClientsAndBoundedProtocolDetection \
+  ctest --test-dir _build -R '^UrmaServerTest$' --output-on-failure
+```
 
 `UrmaReceiveStorageTest` observes actual SDK post addresses and completions on
 a local URMA connection. It checks Header and Rocket with READ enabled and

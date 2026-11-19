@@ -26,6 +26,9 @@
 #include <folly/io/async/AsyncSSLSocket.h>
 #include <folly/io/async/AsyncSocket.h>
 #include <folly/io/async/EventBaseLocal.h>
+#ifdef FOLLY_HAVE_URMA
+#include <folly/io/async/urma/UrmaInit.h>
+#endif
 #include <folly/portability/Sockets.h>
 #include <thrift/lib/cpp/async/TAsyncSSLSocket.h>
 #include <thrift/lib/cpp/concurrency/Util.h>
@@ -195,16 +198,22 @@ void Cpp2Worker::plaintextConnectionReady(
     wangle::TransportInfo& tinfo) {
   // URMA retains this TCP socket for negotiation and connection shutdown.
   sock->setShutdownSocketSet(server_->wShutdownSocketSet_);
+  CheckTLSPeekingManager::Upgrade upgrade;
+  std::chrono::milliseconds timeout{0};
 #ifdef FOLLY_HAVE_URMA
   if (server_->getUseUrma()) {
-    VLOG(1) << "Cpp2Worker: accepting URMA transport on "
-            << server_->getUrmaConfig().dev_name;
-    auto transport = detail::makeUrmaServerTransport(
-        std::move(sock), server_->urmaRuntime_);
-    onNewConnection(
-        std::move(transport), &clientAddr, "",
-        wangle::SecureTransportType::NONE, tinfo);
-    return;
+    timeout = std::chrono::milliseconds(folly::UrmaInit::getConfig().handshake_timeout_ms);
+    upgrade = [this, runtime = server_->urmaRuntime_](
+        folly::AsyncSocket::UniquePtr socket, std::vector<uint8_t> bytes,
+        const folly::SocketAddress& clientAddr, const wangle::TransportInfo& tinfo,
+        CheckTLSPeekingManager::Clock::time_point started) {
+      auto transport = detail::makeUrmaServerTransport(
+          std::move(socket), runtime, started, std::move(bytes));
+      VLOG(1) << "Cpp2Worker: accepting URMA transport on "
+              << server_->getUrmaConfig().dev_name;
+      onNewConnection(std::move(transport), &clientAddr, "",
+                      wangle::SecureTransportType::NONE, tinfo);
+    };
   }
 #endif
   new CheckTLSPeekingManager(
@@ -213,7 +222,9 @@ void Cpp2Worker::plaintextConnectionReady(
       tinfo,
       server_,
       std::move(sock),
-      server_->getObserverShared());
+      server_->getObserverShared(),
+      std::move(upgrade),
+      timeout);
 }
 
 void Cpp2Worker::useExistingChannel(

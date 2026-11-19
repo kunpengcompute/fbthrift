@@ -1,21 +1,26 @@
 /* Copyright (c) Huawei Technologies Co., Ltd. 2026. Licensed under Apache-2.0.
  */
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <folly/Conv.h>
-#include <folly/File.h>
 #include <folly/ScopeGuard.h>
 #include <folly/init/Init.h>
 #include <folly/portability/GTest.h>
 #include <folly/portability/Sockets.h>
 #include <thrift/lib/cpp2/server/ThriftServer.h>
+#include <thrift/lib/cpp/transport/THeader.h>
+#include <thrift/lib/cpp2/protocol/BinaryProtocol.h>
 #include <thrift/lib/cpp2/util/ScopedServerThread.h>
 #ifdef FOLLY_HAVE_URMA
 #include <folly/io/async/urma/UrmaInit.h>
+#include <folly/io/async/urma/UrmaAsyncSocket.h>
 #include <thrift/lib/cpp2/server/detail/UrmaServerRuntime.h>
 #endif
 
@@ -23,6 +28,7 @@ namespace apache::thrift {
 namespace {
 class NoopProcessor : public AsyncProcessor {
  public:
+  explicit NoopProcessor(std::shared_ptr<std::atomic<size_t>> calls) : calls_(std::move(calls)) {}
   void processSerializedCompressedRequestWithMetadata(
       ResponseChannelRequest::UniquePtr,
       SerializedCompressedRequest&&,
@@ -30,13 +36,16 @@ class NoopProcessor : public AsyncProcessor {
       protocol::PROTOCOL_TYPES,
       Cpp2RequestContext*,
       folly::EventBase*,
-      concurrency::ThreadManager*) override {}
+      concurrency::ThreadManager*) override { ++*calls_; }
+ private:
+  std::shared_ptr<std::atomic<size_t>> calls_;
 };
 
 class NoopFactory : public AsyncProcessorFactory {
  public:
+  std::shared_ptr<std::atomic<size_t>> calls = std::make_shared<std::atomic<size_t>>(0);
   std::unique_ptr<AsyncProcessor> getProcessor() override {
-    return std::make_unique<NoopProcessor>();
+    return std::make_unique<NoopProcessor>(calls);
   }
   std::vector<ServiceHandlerBase*> getServiceHandlers() override { return {}; }
 };
@@ -57,6 +66,13 @@ TEST(UrmaServer, TcpRemainsTheDefault) {
   EXPECT_GT(running.getAddress()->getPort(), 0);
 #ifdef FOLLY_HAVE_URMA
   EXPECT_FALSE(folly::UrmaInit::isInitialized());
+  EXPECT_FALSE(folly::UrmaInit::poolIOBufAllocationEnabled());
+  auto buffer = folly::IOBuf::copyBuffer("tcp");
+  EXPECT_FALSE(folly::UrmaInit::ownsPoolBuffer(*buffer));
+  buffer->reserve(32, 8192);
+  EXPECT_FALSE(folly::UrmaInit::ownsPoolBuffer(*buffer));
+  EXPECT_EQ(buffer->length(), 3);
+  EXPECT_EQ(std::string(reinterpret_cast<const char*>(buffer->data()), 3), "tcp");
 #endif
 }
 
@@ -104,6 +120,8 @@ void expectConfigurationConflicts(
   };
   check(&folly::UrmaConfig::dev_name, "dev_name", existing.dev_name + "-other");
   check(&folly::UrmaConfig::rx_depth, "rx_depth", existing.rx_depth + 1);
+  check(&folly::UrmaConfig::rx_target, "rx_target", existing.rx_target + 1);
+  check(&folly::UrmaConfig::max_send_sge, "max_send_sge", existing.max_send_sge + 1);
   check(&folly::UrmaConfig::tx_depth, "tx_depth", existing.tx_depth + 1);
   check(
       &folly::UrmaConfig::buffer_size, "buffer_size", existing.buffer_size + 1);
@@ -123,10 +141,6 @@ void expectConfigurationConflicts(
       &folly::UrmaConfig::max_pending_bytes,
       "max_pending_bytes",
       existing.max_pending_bytes + 1);
-  check(
-      &folly::UrmaConfig::max_retained_bytes,
-      "max_retained_bytes",
-      existing.max_retained_bytes + 1);
   auto differentPool = existing;
   differentPool.registered_pool.pool_max_size += 4096;
   try {
@@ -191,10 +205,21 @@ TEST(UrmaServerHardware, SharedContextOutlivesTheFirstServer) {
   auto one = std::make_unique<util::ScopedServerThread>(first);
   auto two = std::make_unique<util::ScopedServerThread>(second);
   EXPECT_TRUE(folly::UrmaInit::isInitialized());
+  EXPECT_TRUE(folly::UrmaInit::poolIOBufAllocationEnabled());
+  {
+    auto buffer = folly::IOBuf::copyBuffer("urma");
+    EXPECT_TRUE(folly::UrmaInit::ownsPoolBuffer(*buffer));
+    buffer->reserve(32, 8192);
+    EXPECT_TRUE(folly::UrmaInit::ownsPoolBuffer(*buffer));
+  }
   one.reset();
   EXPECT_TRUE(folly::UrmaInit::isInitialized());
+  EXPECT_TRUE(folly::UrmaInit::poolIOBufAllocationEnabled());
   two.reset();
   EXPECT_FALSE(folly::UrmaInit::isInitialized());
+  EXPECT_FALSE(folly::UrmaInit::poolIOBufAllocationEnabled());
+  auto native = folly::IOBuf::copyBuffer("tcp");
+  EXPECT_FALSE(folly::UrmaInit::ownsPoolBuffer(*native));
 }
 
 TEST(UrmaServerHardware, BorrowsAnApplicationContextWithoutFinalizingIt) {
@@ -322,6 +347,117 @@ TEST(UrmaServerHardware, StrictSslWithoutCredentialsDoesNotEnableTls) {
   EXPECT_FALSE(folly::UrmaInit::isInitialized());
 }
 
+template <typename Predicate>
+bool waitFor(folly::EventBase& evb, Predicate ready) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+  while (!ready() && std::chrono::steady_clock::now() < deadline) {
+    evb.loopOnce(EVLOOP_NONBLOCK);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return ready();
+}
+
+std::unique_ptr<folly::IOBuf> makeProbeFrame() {
+  folly::IOBufQueue output(folly::IOBufQueue::cacheChainLength());
+  BinaryProtocolWriter writer;
+  writer.setOutput(&output);
+  writer.writeMessageBegin("probe", MessageType::T_ONEWAY, 1);
+  writer.writeStructBegin("args");
+  writer.writeFieldStop();
+  writer.writeStructEnd();
+  writer.writeMessageEnd();
+  transport::THeader header;
+  header.setProtocolId(protocol::T_BINARY_PROTOCOL);
+  transport::THeader::StringToStringMap headers;
+  auto frame = header.addHeader(output.move(), headers);
+  frame->coalesce();
+  return frame;
+}
+
+TEST(UrmaServerHardware, MixedTcpAndUrmaClients) {
+  const char* device = std::getenv("FBTHRIFT_URMA_TEST_DEVICE");
+  if (!device || !*device) GTEST_SKIP();
+  auto server = makeServer();
+  auto factory = std::make_shared<NoopFactory>();
+  server->setProcessorFactory(factory);
+  folly::UrmaConfig config;
+  config.dev_name = device;
+  server->setUseUrma(true);
+  server->setUrmaConfig(config);
+  {
+    util::ScopedServerThread running(server);
+    folly::EventBase evb;
+    auto tcp = folly::AsyncSocket::newSocket(&evb, *running.getAddress());
+    auto urma = folly::UrmaAsyncSocket::newSocket(&evb, *running.getAddress());
+    ASSERT_TRUE(waitFor(evb, [&] {
+      return static_cast<folly::UrmaAsyncSocket*>(urma.get())->isUrmaReady();
+    }));
+    auto frame = makeProbeFrame();
+    // An incomplete prefix must not be consumed or misclassified.
+    tcp->write(nullptr, frame->data(), 2);
+    for (int i = 0; i < 5; ++i) evb.loopOnce(EVLOOP_NONBLOCK);
+    EXPECT_EQ(factory->calls->load(), 0);
+    urma->writeChain(nullptr, frame->clone());
+    ASSERT_TRUE(waitFor(evb, [&] { return factory->calls->load() == 1; }));
+    tcp->write(nullptr, frame->data() + 2, frame->length() - 2);
+    ASSERT_TRUE(waitFor(evb, [&] { return factory->calls->load() == 2; }));
+    // A mixed listener can read past the first TCP frame while identifying
+    // the protocol. Both frames must reach the Header transport.
+    auto pipelined = folly::AsyncSocket::newSocket(&evb, *running.getAddress());
+    frame->appendToChain(frame->clone());
+    pipelined->writeChain(nullptr, std::move(frame));
+    ASSERT_TRUE(waitFor(evb, [&] { return factory->calls->load() == 4; }));
+    tcp->closeNow();
+    urma->closeNow();
+  }
+  EXPECT_FALSE(folly::UrmaInit::isInitialized());
+}
+
+TEST(UrmaServerHardware, HandshakeDeadlineOnlyAppliesToUrmaPrefixes) {
+  const char* device = std::getenv("FBTHRIFT_URMA_TEST_DEVICE");
+  if (!device || !*device) GTEST_SKIP();
+  auto server = makeServer();
+  auto factory = std::make_shared<NoopFactory>();
+  server->setProcessorFactory(factory);
+  folly::UrmaConfig config;
+  config.dev_name = device;
+  config.handshake_timeout_ms = 500;
+  server->setUseUrma(true);
+  server->setUrmaConfig(config);
+  {
+    util::ScopedServerThread running(server);
+    folly::EventBase evb;
+    auto idle = folly::AsyncSocket::newSocket(&evb, *running.getAddress());
+    auto partial = folly::AsyncSocket::newSocket(&evb, *running.getAddress());
+    auto frame = makeProbeFrame();
+    partial->write(nullptr, frame->data(), 2);
+    struct Reader : folly::AsyncTransport::ReadCallback {
+      char bytes[128]{};
+      bool closed{false};
+      void getReadBuffer(void** p, size_t* n) override { *p = bytes; *n = sizeof(bytes); }
+      void readDataAvailable(size_t) noexcept override {}
+      void readEOF() noexcept override { closed = true; }
+      void readErr(const folly::AsyncSocketException&) noexcept override { closed = true; }
+    } reader;
+    for (bool incompatible : {false, true}) {
+      reader.closed = false;
+      auto bad = folly::AsyncSocket::newSocket(&evb, *running.getAddress());
+      bad->setReadCB(&reader);
+      const uint8_t prefix[13] = {'U', 'R', 'M', 'A', 0, 102, 0, 2, 0, 1, 0, 0, 0};
+      bad->write(nullptr, prefix, incompatible ? sizeof(prefix) : 2);
+      ASSERT_TRUE(waitFor(evb, [&] { return reader.closed; }));
+      bad->setReadCB(nullptr);
+      bad->closeNow();
+    }
+    // The truncated URMA prefix timed out. Both pre-existing TCP clients
+    // must still be able to deliver their original frames.
+    idle->writeChain(nullptr, frame->clone());
+    partial->write(nullptr, frame->data() + 2, frame->length() - 2);
+    ASSERT_TRUE(waitFor(evb, [&] { return factory->calls->load() == 2; }));
+  }
+  EXPECT_FALSE(folly::UrmaInit::isInitialized());
+}
+
 TEST(UrmaServerHardware, ShutdownSetClosesAnAcceptedUrmaHandshakeSocket) {
   const char* device = std::getenv("FBTHRIFT_URMA_TEST_DEVICE");
   if (!device || !*device) {
@@ -337,29 +473,41 @@ TEST(UrmaServerHardware, ShutdownSetClosesAnAcceptedUrmaHandshakeSocket) {
   server->setUseUrma(true);
   {
     util::ScopedServerThread running(server);
-    folly::File client(::socket(AF_INET, SOCK_STREAM, 0), true);
-    ASSERT_GE(client.fd(), 0);
-    timeval timeout{2, 0};
-    ASSERT_EQ(
-        ::setsockopt(
-            client.fd(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)),
-        0);
-    sockaddr_storage address{};
-    auto length = running.getAddress()->getAddress(&address);
-    ASSERT_EQ(
-        ::connect(client.fd(), reinterpret_cast<sockaddr*>(&address), length),
-        0);
-    char hello[4096];
-    // Receiving HELLO proves the accepted socket has entered the URMA path.
-    ASSERT_GT(::recv(client.fd(), hello, sizeof(hello), 0), 0);
+    folly::EventBase evb;
+    struct Reader : folly::AsyncTransport::ReadCallback {
+      char byte{};
+      bool closed{false};
+      void getReadBuffer(void** data, size_t* size) override {
+        *data = &byte;
+        *size = 1;
+      }
+      void readDataAvailable(size_t) noexcept override {}
+      void readEOF() noexcept override { closed = true; }
+      void readErr(const folly::AsyncSocketException&) noexcept override {
+        closed = true;
+      }
+    } reader;
+    auto client =
+        folly::UrmaAsyncSocket::newSocket(&evb, *running.getAddress());
+    client->setReadCB(&reader);
+    auto wait = [&](auto ready) {
+      for (int i = 0; i < 1000; ++i) {
+        evb.loopOnce(EVLOOP_NONBLOCK);
+        if (ready())
+          return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+      return false;
+    };
+    // Complete the handshake with a real peer before testing shutdown.
+    ASSERT_TRUE(wait([&] {
+      return static_cast<folly::UrmaAsyncSocket*>(client.get())->isUrmaReady();
+    }));
     sockets->shutdownAll();
-    ssize_t received;
-    do {
-      // TCP may split HELLO across reads; drain any remainder before EOF.
-      received = ::recv(client.fd(), hello, sizeof(hello), 0);
-    } while (received > 0);
-    EXPECT_TRUE(received == 0 || (received < 0 && errno == ECONNRESET))
-        << "Accepted URMA socket was not shut down, errno=" << errno;
+    EXPECT_TRUE(wait([&] { return reader.closed; }))
+        << "Accepted URMA socket was not shut down";
+    client->setReadCB(nullptr);
+    client->closeNow();
   }
   EXPECT_FALSE(folly::UrmaInit::isInitialized());
 }

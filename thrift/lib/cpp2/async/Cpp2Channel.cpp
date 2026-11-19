@@ -197,7 +197,23 @@ void Cpp2Channel::sendMessage(
 
   DestructorGuard dg(this);
 
-  auto future = pipeline_->write(std::make_pair(std::move(buf), header));
+  auto future = folly::Future<folly::Unit>::makeEmpty();
+  try {
+    future = pipeline_->write(std::make_pair(std::move(buf), header));
+  } catch (const std::bad_alloc&) {
+    // Framing failed before this write acquired a completion future. Earlier
+    // buffered writes still own the callbacks at the front of the queue.
+    sendCallbacks_.pop_back();
+    if (!detail::usesUrmaRecords(transport_.get())) {
+      throw;
+    }
+    if (callback) {
+      callback->messageSendError(
+          folly::exception_wrapper(std::current_exception()));
+    }
+    closeNow();
+    return;
+  }
   std::move(future).thenTry([this, dg](folly::Try<folly::Unit>&& t) {
     if (t.withException<TTransportException>(
             [&](const TTransportException& ex) { writeError(0, ex); }) ||

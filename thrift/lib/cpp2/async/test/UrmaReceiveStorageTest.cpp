@@ -22,8 +22,11 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -40,10 +43,17 @@ struct DmaRange {
   }
 };
 std::mutex traceMutex;
+// Providers may re-enter SDK APIs. Observe only the application's outer call.
+thread_local bool insideSdkCall = false;
+struct TraceCall {
+  bool nested = std::exchange(insideSdkCall, true);
+  ~TraceCall() { insideSdkCall = nested; }
+};
 using Key = std::pair<urma_jfc_t*, uint64_t>;
 std::map<Key, DmaRange> postedRx, postedRead;
-std::vector<DmaRange> completed, protectedStorage, serializedSources;
-size_t replacements = 0, offers = 0;
+std::vector<DmaRange> completed, protectedStorage, serializedSources, framingSources;
+size_t replacements = 0, offers = 0, payloadOffers = 0;
+std::set<std::pair<uint64_t, uint64_t>> observedPulls;
 void check(bool value, const char* message) {
   if (!value) throw std::runtime_error(message);
 }
@@ -162,13 +172,14 @@ void exercise(bool useRocket, bool useRead, size_t bodyBytes = kBody) {
   {
     std::lock_guard<std::mutex> lock(traceMutex);
     postedRx.clear(); postedRead.clear(); completed.clear();
-    protectedStorage.clear(); serializedSources.clear();
-    replacements = offers = 0;
+    protectedStorage.clear(); serializedSources.clear(); framingSources.clear();
+    replacements = offers = payloadOffers = 0;
+    observedPulls.clear();
   }
   UrmaConfig config;
   config.dev_name = std::getenv("FBTHRIFT_URMA_TEST_DEVICE");
   config.enable_read = useRead;
-  config.rx_depth = 4; // Eight frames force actual slot reuse while bodies are held.
+  config.rx_depth = config.rx_target = 4; // Eight frames force actual slot reuse while bodies are held.
   UrmaInit::init(config);
   Capture capture(useRead, bodyBytes);
   {
@@ -226,31 +237,53 @@ void exercise(bool useRocket, bool useRead, size_t bodyBytes = kBody) {
         transport::THeader::StringToStringMap headers;
         frame = header.addHeader(std::move(body), headers);
       }
+      // A large record also contains small protocol headers. The shared
+      // transport may READ these registered fragments independently.
+      {
+        std::lock_guard<std::mutex> lock(traceMutex);
+        auto* node = frame.get();
+        do {
+          if (node->length() < config.read_threshold)
+            framingSources.push_back({reinterpret_cast<uintptr_t>(node->data()), node->length(), true});
+          node = node->next();
+        } while (node != frame.get());
+      }
       client->writeChain(&writes, std::move(frame));
     }
     pump(evb, [&] { return writes.done == kMessages && capture.count == kMessages; });
     check(!writes.errors && !rocketOwner.error && !rocketOwner.charged, "framework callback/error accounting");
-    const auto tx = client->getCopyStats(), rx = accepted.socket->getCopyStats();
-    check(!tx.copied_send_bytes && !rx.copied_send_bytes && !rx.copied_read_target_bytes,
-          "registered functional path performed a transport payload copy");
-    check(useRead ? (offers == kMessages && rx.read_wr_submitted == kMessages &&
-                     tx.direct_read_source_bytes == rx.transferred_read_target_bytes)
-                  : (!offers && !rx.read_wr_submitted), "READ toggle or byte accounting mismatch");
-    check(replacements > config.rx_depth && !UrmaInit::poolStats().exported_bytes,
+    const auto tx = client->getUrmaStats(), rx = accepted.socket->getUrmaStats();
+    const auto [readBytes, offerCount, payloadOfferCount, replacementCount] = [&] {
+      std::lock_guard<std::mutex> lock(traceMutex);
+      size_t bytes = 0;
+      for (const auto& range : completed) if (range.read) bytes += range.size;
+      return std::make_tuple(bytes, offers, payloadOffers, replacements);
+    }();
+    // RX identity is checked against actual DMA addresses by Capture. Small
+    // fragmented SEND frames may be coalesced; registered READ sources must
+    // still match the original serializer allocations observed by the hook.
+    check(!tx.copiedReadBytes && !rx.copiedReadBytes,
+          "registered READ source took a staging copy");
+    check(useRead ? (payloadOfferCount == kMessages && rx.reads == offerCount &&
+                     tx.directReadBytes == readBytes)
+                  : (!offerCount && !rx.reads), "READ toggle or byte accounting mismatch");
+    check(replacementCount > config.rx_depth && !UrmaInit::poolStats().exported_bytes,
           "RX slots did not refill or sources still exported after FREE");
     std::cout << (useRocket ? "Rocket" : "Header")
               << (useRead ? " READ" : " SEND") << " body_bytes=" << bodyBytes
               << " messages=" << capture.count
-              << " copied_send_bytes=" << tx.copied_send_bytes << '/' << rx.copied_send_bytes
-              << " copied_receive_bytes=" << rx.copied_read_target_bytes
-              << " read_count=" << rx.read_wr_submitted
-              << " read_bytes=" << tx.direct_read_source_bytes << '/' << rx.transferred_read_target_bytes
-              << " slot_replacements=" << replacements << '\n';
+              << " copied_send_bytes=" << tx.copiedSendBytes << '/' << rx.copiedSendBytes
+              << " read_count=" << rx.reads
+              << " read_bytes=" << tx.directReadBytes << '/' << readBytes
+              << " slot_replacements=" << replacementCount << '\n';
     capture.verifyRetained();
     accepted.socket->setReadCB(nullptr);
     pipeline.reset();
     client->closeNow(); accepted.socket->closeNow();
-    pump(evb, [] { return urma_detail::UrmaIoContext::activeRoutes() == 0; });
+    pump(evb, [&] {
+      const auto state = UrmaIoContext::get(&evb).snapshot();
+      return !state.connections && !state.retired;
+    });
     listener->removeAcceptCallback(&accepted, &evb);
     listener->stopAccepting();
     evb.loopOnce(EVLOOP_NONBLOCK);
@@ -276,10 +309,14 @@ void exercise(bool useRocket, bool useRead, size_t bodyBytes = kBody) {
 // Observe real SDK buffers/completions; never replace DMA or manufacture CQEs.
 extern "C" urma_status_t urma_post_jfr_wr(urma_jfr_t* q, urma_jfr_wr_t* wr, urma_jfr_wr_t** bad) {
   static auto real = reinterpret_cast<decltype(&urma_post_jfr_wr)>(dlsym(RTLD_NEXT, "urma_post_jfr_wr"));
-  std::lock_guard<std::mutex> lock(traceMutex);
+  TraceCall call;
+  if (call.nested) return real(q, wr, bad);
+  std::unique_lock<std::mutex> lock(traceMutex);
   for (const auto& range : protectedStorage)
     check(!range.contains(wr->src.sge[0].addr, 1), "reposted a block still owned by protocol/business IOBuf");
+  lock.unlock();
   const auto result = real(q, wr, bad);
+  lock.lock();
   if (result == URMA_SUCCESS) {
     const Key key{q->jfr_cfg.jfc, wr->user_ctx};
     replacements += postedRx.count(key);
@@ -289,21 +326,38 @@ extern "C" urma_status_t urma_post_jfr_wr(urma_jfr_t* q, urma_jfr_wr_t* wr, urma
 }
 extern "C" urma_status_t urma_post_jfs_wr(urma_jfs_t* q, urma_jfs_wr_t* wr, urma_jfs_wr_t** bad) {
   static auto real = reinterpret_cast<decltype(&urma_post_jfs_wr)>(dlsym(RTLD_NEXT, "urma_post_jfs_wr"));
-  std::lock_guard<std::mutex> lock(traceMutex);
+  TraceCall call;
+  if (call.nested) return real(q, wr, bad);
   const auto result = real(q, wr, bad);
-  if (result == URMA_SUCCESS && wr->opcode == URMA_OPC_READ)
-    postedRead[{q->jfs_cfg.jfc, wr->user_ctx}] = {wr->rw.dst.sge[0].addr, wr->rw.dst.sge[0].len, true};
-  if (result == URMA_SUCCESS && wr->opcode == URMA_OPC_SEND_IMM && wr->send.src.sge[0].len == 32) {
-    const size_t bytes = folly::urma_detail::getInteger(reinterpret_cast<const uint8_t*>(wr->send.src.sge[0].addr) + 24, 4);
-    check(std::any_of(serializedSources.begin(), serializedSources.end(), [&](const DmaRange& range) {
-      return range.contains(wr->send.imm_data, bytes);
-    }), "PULL source differs from original registered serializer output");
-    ++offers;
+  std::lock_guard<std::mutex> lock(traceMutex);
+  if (result == URMA_SUCCESS) for (auto* p = wr; p; p = p->next) {
+    if (p->opcode == URMA_OPC_READ)
+      postedRead[{q->jfs_cfg.jfc, p->user_ctx}] = {p->rw.dst.sge[0].addr, p->rw.dst.sge[0].len, true};
+    if (p->opcode == URMA_OPC_SEND && p->send.src.sge[0].len == 40) {
+      const auto* header = reinterpret_cast<const uint8_t*>(p->send.src.sge[0].addr);
+      if (header[6] != uint8_t(folly::urma_detail::PacketKind::Pull)) continue;
+      // Four RX slots intentionally cause RNR; retries reuse the business ID.
+      if (!observedPulls.emplace(folly::urma_detail::getInteger(header + 8, 8),
+                                 folly::urma_detail::getInteger(header + 16, 8)).second)
+        continue;
+      const size_t bytes = folly::urma_detail::getInteger(header + 24, 4);
+      const auto containsSource = [&](const DmaRange& range) {
+        return range.contains(folly::urma_detail::getInteger(header + 32, 8), bytes);
+      };
+      if (std::any_of(serializedSources.begin(), serializedSources.end(), containsSource))
+        ++payloadOffers;
+      else
+        check(std::any_of(framingSources.begin(), framingSources.end(), containsSource),
+              "PULL source differs from original registered serializer/header storage");
+      ++offers;
+    }
   }
   return result;
 }
 extern "C" int urma_poll_jfc(urma_jfc_t* cq, int count, urma_cr_t* out) {
   static auto real = reinterpret_cast<decltype(&urma_poll_jfc)>(dlsym(RTLD_NEXT, "urma_poll_jfc"));
+  TraceCall call;
+  if (call.nested) return real(cq, count, out);
   const int n = real(cq, count, out);
   std::lock_guard<std::mutex> lock(traceMutex);
   for (int i = 0; i < n; ++i) {

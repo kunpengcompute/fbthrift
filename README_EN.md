@@ -9,13 +9,13 @@ This document describes the FbThrift request path performance optimization patch
 ## Latest News
 
 - [2026-09-30]: Released the FbThrift V1.1.0 optimization patch. Added dynamic receive buffer, Folly IOBuf TLS memory pool, ThreadManager direct-func, and lock removal on the request hot path, along with a complete benchmark and automated build pipeline.
-- [2026-06-30]: Released the FbThrift V1.1.0 patch based on Meta's open-source FbThrift serialization framework. This patch optimizes batch encoding of integer arrays in the FbThrift serialization framework, significantly improving serialization performance through the Arm SVE2 instruction set and compiler auto-vectorization.
+- [2026-06-30]: Released the FbThrift V1.0.0 patch based on Meta's open-source FbThrift serialization framework. This patch optimizes batch encoding of integer arrays in the FbThrift serialization framework, significantly improving serialization performance through the Arm SVE2 instruction set and compiler auto-vectorization.
 
 ## Project Introduction
 
 FbThrift is a high-performance RPC framework and serialization library open sourced by Meta. It is widely used in distributed systems and microservice architectures, and supports transport methods such as Compact Protocol, Binary Protocol, Header, and Rocket.
 
-This project performs performance optimization on the end-to-end request path of FbThrift. FbThrift V1.1.0 provides batch serialization optimization for Compact Protocol and Binary Protocol.
+This project performs performance optimization on the end-to-end request path of FbThrift. FbThrift V1.0.0 provides batch serialization optimization for Compact Protocol and Binary Protocol.
 FbThrift V1.1.0 further covers network packet reception, buffer allocation, CPU task scheduling, and the common request path, reducing system calls, memory allocation, and synchronization overhead in high-QPS scenarios.
 
 ## Directory Structure

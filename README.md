@@ -13,7 +13,7 @@
 
 FbThrift是Meta开源的高性能RPC框架和序列化库，广泛应用于分布式系统和微服务架构中，支持Compact Protocol、Binary Protocol以及Header、Rocket等传输方式。
 
-本项目面向FbThrift端到端请求链路进行性能优化。FbThrift V1.1.0提供Compact Protocol与Binary Protocol批量序列化优化。
+本项目面向FbThrift端到端请求链路进行性能优化。FbThrift V1.0.0提供Compact Protocol与Binary Protocol批量序列化优化。
 FbThrift V1.1.0进一步覆盖网络收包、缓冲区分配、CPU任务调度和请求公共路径，降低高QPS场景下的系统调用、内存分配和同步开销。
 
 ## 目录结构

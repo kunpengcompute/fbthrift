@@ -15,7 +15,7 @@ This document describes the FbThrift request path performance optimization patch
 
 FbThrift is a high-performance RPC framework and serialization library open sourced by Meta. It is widely used in distributed systems and microservice architectures, and supports transport methods such as Compact Protocol, Binary Protocol, Header, and Rocket.
 
-This project performs performance optimization on the end-to-end request path of FbThrift. FbThrift V1.1.0 provides batch serialization optimization for Compact Protocol and Binary Protocol.
+This project performs performance optimization on the end-to-end request path of FbThrift. FbThrift V1.0.0 provides batch serialization optimization for Compact Protocol and Binary Protocol.
 FbThrift V1.1.0 further covers network packet reception, buffer allocation, CPU task scheduling, and the common request path, reducing system calls, memory allocation, and synchronization overhead in high-QPS scenarios.
 
 ## Directory Structure

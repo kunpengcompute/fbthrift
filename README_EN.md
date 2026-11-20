@@ -1,20 +1,22 @@
 # FbThrift Request Path Optimization Introduction
 
-<!-- md-trans-meta sourceCommit=c085ca84d69a0b59b67552ad7e34db264c12bf60 translatedAt=2026-10-21T03:43:04.247Z pushedAt=2026-10-21T11:27:31.022Z -->
+<!-- md-trans-meta sourceCommit=3d99de672186d1c4a4ed973703ab844b69698f9d translatedAt=2026-11-17T03:43:04.247Z pushedAt=2026-11-18T11:27:31.022Z -->
 
-[简体中文](./README.md) | English
+[简体中文](./README.md)|English
+
+This document describes the FbThrift request path performance optimization patch, covering the V1.0.0 and V1.1.0 optimization features, directory structure, release notes, and learning documents. It is intended for developers who use the FbThrift performance optimization patch.
 
 ## Latest News
 
-- [2026-09-30]: Released the FbThrift v1.1.0 optimization patch. Added dynamic receive buffer, Folly IOBuf TLS memory pool, ThreadManager direct-func, and lock removal on the request hot path, along with a complete benchmark and automated build pipeline.
-- [2026-06-30]: Released the FbThrift v1.0.0 patch based on Meta's open-source FbThrift serialization framework. This patch optimizes batch encoding of integer arrays in the FbThrift serialization framework, significantly improving serialization performance through the Arm SVE2 instruction set and compiler auto-vectorization.
+- [2026-09-30]: Released the FbThrift V1.1.0 optimization patch. Added dynamic receive buffer, Folly IOBuf TLS memory pool, ThreadManager direct-func, and lock removal on the request hot path, along with a complete benchmark and automated build pipeline.
+- [2026-06-30]: Released the FbThrift V1.1.0 patch based on Meta's open-source FbThrift serialization framework. This patch optimizes batch encoding of integer arrays in the FbThrift serialization framework, significantly improving serialization performance through the Arm SVE2 instruction set and compiler auto-vectorization.
 
 ## Project Introduction
 
 FbThrift is a high-performance RPC framework and serialization library open sourced by Meta. It is widely used in distributed systems and microservice architectures, and supports transport methods such as Compact Protocol, Binary Protocol, Header, and Rocket.
 
-This project performs performance optimization on the end-to-end request path of FbThrift. FbThrift v1.0.0 provides batch serialization optimization for Compact Protocol and Binary Protocol.
-FbThrift v1.1.0 further covers network packet reception, buffer allocation, CPU task scheduling, and the common request path, reducing system calls, memory allocation, and synchronization overhead in high-QPS scenarios.
+This project performs performance optimization on the end-to-end request path of FbThrift. FbThrift V1.1.0 provides batch serialization optimization for Compact Protocol and Binary Protocol.
+FbThrift V1.1.0 further covers network packet reception, buffer allocation, CPU task scheduling, and the common request path, reducing system calls, memory allocation, and synchronization overhead in high-QPS scenarios.
 
 ## Directory Structure
 
@@ -25,26 +27,25 @@ fbthrift/
 │   │   ├── api_reference.md        # API Reference
 │   │   ├── quick_start.md          # Quick Start
 │   │   └── release_notes.md        # Release Notes
-│   └── LICENSE
 │   ├── zh/                         # Chinese documents
 │   │   ├── api_reference.md        # API Reference
 │   │   ├── quick_start.md          # Quick Start
 │   │   └── release_notes.md        # Release Notes
 │   └── LICENSE
 ├── LICENSE
-├── fbthrift_opt_simd.patch         # FbThrift v1.1.0 optimization patch file
+├── fbthrift_opt_simd.patch         # FbThrift V1.1.0 optimization patch file
 └── README.md                       # Project introduction
 ```
 
 ## Feature Description
 
-### v1.1.0 Optimization Features
+### V1.1.0 Optimization Features
 
 | Optimization | Location | Core Approach |
 | -- | -- | -- |
-| Dynamic receive buffer | network packet reception | Dynamically adjusts the read buffer based on recent complete frame lengths, reducing the number of `recv()` calls for large messages. |
-| Folly IOBuf TLS memory pool | Buffer allocation | Reuses data blocks per thread and splits them into slices, reducing frequent `malloc/free` calls. |
-| ThreadManager direct-func | CPU task scheduling | The `Task` directly stores and executes `folly::Func`, avoiding the creation of a `FunctionRunner` for regular RPCs. |
+| Dynamic receive buffer | Network packet reception | Dynamically adjusts the read buffer based on recent complete frame lengths, reducing the number of recv() calls for large messages. |
+| Folly IOBuf TLS memory pool | Buffer allocation | Reuses data blocks per thread and splits them into slices, reducing frequent malloc/free calls. |
+| ThreadManager direct-func | CPU task scheduling | `Task` directly stores and executes `folly::Func`, avoiding the creation of a FunctionRunner for regular RPCs. |
 | Lock removal on the request hot path | Common request path | Removes redundant locks that no longer provide effective concurrent write protection, reducing multi-core contention. |
 
 Each optimization retains the necessary compatibility or fallback path. For specific interfaces, build methods, and risk boundaries, see the documentation.
@@ -62,7 +63,7 @@ For complete instructions on compiling the optimized FbThrift from scratch and r
 | Document | Description |
 | --------- | --------- |
 | [Quick Start](docs/en/quick_start.md) | Provides guidance on manual compilation, script-based compilation, and benchmark execution. |
-| [Release Notes](docs/en/release_notes.md) | Provides v1.1.0 version information, performance verification, and compatibility notes. |
+| [Release Notes](docs/en/release_notes.md) | Provides V1.1.0 version information, performance verification, and compatibility notes. |
 | [API Reference](docs/en/api_reference.md) | Provides serialization, ThreadManager, and Header interface descriptions by version. |
 
 ## Disclaimer

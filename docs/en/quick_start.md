@@ -1,16 +1,15 @@
 # Quick Start
 
-<!-- md-trans-meta sourceCommit=c085ca84d69a0b59b67552ad7e34db264c12bf60 translatedAt=2026-10-21T03:43:10.923Z pushedAt=2026-10-21T06:21:35.191Z -->
+<!-- md-trans-meta sourceCommit=3d99de672186d1c4a4ed973703ab844b69698f9d translatedAt=2026-11-17T03:42:58.328Z pushedAt=2026-11-18T03:54:47.055Z -->
 
 This document guides you through building FbThrift with four request-path optimizations from scratch, and compiling and starting the accompanying benchmark. The four optimizations include the dynamic receive buffer, Folly IOBuf TLS memory pool, ThreadManager direct-func, and lock removal on the request hot path.
 
-> ![note](public_sys-resources/icon-note.gif) **NOTE**
->
-> This document applies to FbThrift v1.1.0.
+>![note](public_sys-resources/icon-note.gif) **NOTE**
+> This document applies to FbThrift V1.1.0.
 
 ## Creating a Working Directory and Obtaining the Public Benchmark Repository
 
-This project provides two ways to obtain the optimized source code: directly obtain the optimized source code, or obtain the baseline source code, verify and apply patches in sequence. After completion, prepare the build environment.
+This project provides two ways to obtain the optimized source code: directly obtain the optimized source code, or obtain the baseline source code, verify and apply patches in sequence. After that, prepare the build environment.
 
 First, create a unified working directory. The source code, installation directories, and benchmarks of Folly, Fizz, Wangle, and FbThrift are all located under `$WORK`.
 
@@ -70,7 +69,6 @@ The patch and the checksum file must come from the same release version. When th
    ```
 
    >![note](./public_sys-resources/icon-note.gif) **NOTE**
-   >
    >This command reads the digest value in the checksum file, compares it with the SHA-256 digest of the actual patch, and checks the checksum file format. You can refer to [command description](https://www.gnu.org/software/coreutils/manual/html_node/sha2-utilities.html).
 
    If verification passes, the output is as follows.
@@ -82,8 +80,7 @@ The patch and the checksum file must come from the same release version. When th
 2. AccLibBenchmark serves as a code collection of stress testing tools. After pulling it, apply only the `fbthrift_folly_benchmark` stress testing tool and the `fb_folly_autobuild` automation scripts, as shown in [Creating a Working Directory and Obtaining the Public Benchmark Repository](#creating-a-working-directory-and-obtaining-the-public-benchmark-repository).
 
    >![note](public_sys-resources/icon-note.gif) **NOTE**
-   >
-   >When installing with the script, the optimized code version is pulled by default. If code patches are needed based on the open-source repository, place `fbthrift_folly.patch` from the master branch of the patch repository into the `fb_folly_autobuild/` directory, and the script will apply the patch automatically.
+   >When installing with the script, the optimized code version is pulled by default. If you are building from the open-source repository and need code patches, place `fbthrift_folly.patch` from the master branch of the patch repository into the `fb_folly_autobuild/` directory, and the script will apply the patch automatically.
 
 **Result Evaluation**
 
@@ -120,45 +117,45 @@ It is recommended to prepare at least 30 GB of available disk space and ensure t
 
 - For Debian or Ubuntu, run the following commands:
 
-  ```bash
-  sudo apt-get update
-  sudo apt-get install -y \
-  git cmake build-essential pkg-config xz-utils numactl \
-  liburing-dev libboost-all-dev libdouble-conversion-dev \
-  libgflags-dev libgoogle-glog-dev libevent-dev libsodium-dev \
-  liblz4-dev libsnappy-dev libzstd-dev libfmt-dev liblzma-dev \
-  libgtest-dev libgmock-dev libssl-dev libaio-dev \
-  libunwind-dev libdwarf-dev binutils-dev libiberty-dev \
-  zlib1g-dev libbz2-dev
-  ```
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y \
+   git cmake build-essential pkg-config xz-utils numactl \
+   liburing-dev libboost-all-dev libdouble-conversion-dev \
+   libgflags-dev libgoogle-glog-dev libevent-dev libsodium-dev \
+   liblz4-dev libsnappy-dev libzstd-dev libfmt-dev liblzma-dev \
+   libgtest-dev libgmock-dev libssl-dev libaio-dev \
+   libunwind-dev libdwarf-dev binutils-dev libiberty-dev \
+   zlib1g-dev libbz2-dev
+   ```
 
 - For openEuler or other RPM-based systems, run the following commands:
 
-  ```bash
-  sudo dnf install -y \
-  git cmake make gcc gcc-c++ pkgconf-pkg-config numactl \
-  fmt fmt-devel glog glog-devel gflags gflags-devel \
-  libevent libevent-devel double-conversion double-conversion-devel \
-  boost boost-devel libunwind libunwind-devel \
-  lz4 lz4-devel zstd zstd-devel libsodium libsodium-devel \
-  liburing liburing-devel libatomic zlib zlib-devel \
-  openssl openssl-devel
-  ```
+   ```bash
+   sudo dnf install -y \
+   git cmake make gcc gcc-c++ pkgconf-pkg-config numactl \
+   fmt fmt-devel glog glog-devel gflags gflags-devel \
+   libevent libevent-devel double-conversion double-conversion-devel \
+   boost boost-devel libunwind libunwind-devel \
+   lz4 lz4-devel zstd zstd-devel libsodium libsodium-devel \
+   liburing liburing-devel libatomic zlib zlib-devel \
+   openssl openssl-devel
+   ```
 
 - Folly requires the Snappy dynamic library version 1.1.8 or later. After the system dependencies are installed, run the following commands to check the Snappy version and the path of the `libsnappy.so` dynamic library.
 
-  ```bash
-  pkg-config --modversion snappy
-  ldconfig -p | grep 'libsnappy\.so'
-  ```
+   ```bash
+   pkg-config --modversion snappy
+   ldconfig -p | grep 'libsnappy\.so'
+   ```
 
-  If the Snappy version is earlier than 1.1.8, only the static library is installed, or Folly and Benchmark actually load different versions of `libsnappy.so`, the following error may occur when compiling Benchmark.
+   If the Snappy version is earlier than 1.1.8, only the static library is installed, or Folly and Benchmark actually load different versions of `libsnappy.so`, the following error may occur when compiling Benchmark.
 
-  ```output
-  undefined symbol: _ZTIN6snappy6sourceE
-  ```
+   ```output
+   undefined symbol: _ZTIN6snappy6sourceE
+   ```
 
-  When this error occurs, upgrade the Snappy dynamic library first, ensure that Folly and Benchmark use the same version, and then recompile Folly and Benchmark.
+   When this error occurs, upgrade the Snappy dynamic library first, ensure that Folly and Benchmark use the same version, and then recompile Folly and Benchmark.
 
 ### Preparing Clang 16
 
@@ -173,7 +170,6 @@ export CXX="$(command -v clang++-16)"
 ```
 
 >![note](public_sys-resources/icon-note.gif) **NOTE**
->
 >If Clang 16 is not available on the system, use an LLVM binary package that matches the target architecture. Folly, Fizz, Wangle, FbThrift, and Benchmark must use the same set of `CC` and `CXX`.
 
 ## Manual Compilation
@@ -197,7 +193,7 @@ The FbThrift source code is ready. The following commands obtain the Folly, Fizz
    git clone https://gitcode.com/boostkit/AccLibBenchmark.git "$ACCLIB"
    ```
 
-The responsibilities of the two FbThrift-related directories in the repository are as follows. (If you do not have the required permissions, contact the maintainer to apply for them and explain the reason.)
+The responsibilities of the two FbThrift-related directories in the repository are as follows. (If you do not have the required permissions, report the issue on the [FbThrift open-source repository issue page](https://gitcode.com/boostkit/fbthrift/issues).)
 
 - [fbthrift_folly_benchmark](https://gitcode.com/boostkit/AccLibBenchmark/tree/master/fbthrift_folly_benchmark): Stores the `press.thrift` file, CMake configuration, and the source code of `press_client` and `press_server`.
 - [fb_folly_autobuild](https://gitcode.com/boostkit/AccLibBenchmark/tree/master/fb_folly_autobuild): Stores the `install.py` auto build script, the `run.py` performance matrix script, and usage instructions.
@@ -218,8 +214,7 @@ AccLibBenchmark/
 AccLibBenchmark is a code collection of stress testing tools and many of them are not used. After pulling the stress testing tool repository, select only the `fbthrift_folly_benchmark` stress testing tool and the `fb_folly_autobuild` automation scripts, as shown in the directory structure above.
 
 >![note](./public_sys-resources/icon-note.gif) **NOTE**
->
->When installing with the script, the optimized code version is pulled by default. If the script needs to apply patches, first complete patch verification, and then place `fbthrift_folly.patch` in the `fb_folly_autobuild/` directory. For the script-based installation method, see [Build Script](#build-script).
+>When installing with the script, the optimized code version is pulled by default. If you need the script to apply patches, first complete patch verification, and then place `fbthrift_folly.patch` in the `fb_folly_autobuild/` directory. For the script-based installation method, see [Build Script](#build-script).
 
 ### Compiling Folly
 
@@ -400,7 +395,7 @@ The script-based approach is suitable for repeated builds, rebuilding after sour
    test -f run.py
    ```
 
-As described in [Creating a Working Directory and Obtaining the Public Benchmark Repository](#creating-a-working-directory-and-obtaining-the-public-benchmark-repository), if you build based on the FbThrift v1.1.0 release package, you need to provide the `fbthrift_folly.patch` patch and place it in the current directory.
+As described in [Creating a Working Directory and Obtaining the Public Benchmark Repository](#creating-a-working-directory-and-obtaining-the-public-benchmark-repository), if you build based on the FbThrift V1.1.0 release package, you need to provide the `fbthrift_folly.patch` patch and place it in the current directory.
 
 ### Adapting the Public Repository Directory
 
@@ -488,4 +483,4 @@ THRIFT_ENABLE_ARM_SVE2 = True
 
 |Version|Date|Description|
 |:---|:---|:---|
-|01|2026-9-30|This is the first official release.|
+|01|2026-09-30|This is the first official release.|

@@ -7,7 +7,7 @@
 ## 最新消息
 
 - [2026-09-30]：发布优化补丁FbThrift V1.1.0版本。新增动态收包缓冲区、Folly IOBuf TLS内存池、ThreadManager direct-func和请求热路径去锁优化，并提供完整Benchmark与自动构建流程。
-- [2026-06-30]：基于Meta开源的FbThrift序列化发布补丁FbThrift V1.1.0版本。针对FbThrift序列化框架进行整型数组批量编码优化，通过ARM SVE2指令集和编译器自动向量化技术显著提升序列化性能。
+- [2026-06-30]：基于Meta开源的FbThrift序列化发布补丁FbThrift V1.0.0版本。针对FbThrift序列化框架进行整型数组批量编码优化，通过ARM SVE2指令集和编译器自动向量化技术显著提升序列化性能。
 
 ## 项目介绍
 

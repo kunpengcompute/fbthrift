@@ -9,7 +9,7 @@ This document describes the FbThrift request path performance optimization patch
 ## Latest News
 
 - [2026-09-30]: Released the FbThrift V1.1.0 optimization patch. Added dynamic receive buffer, Folly IOBuf TLS memory pool, ThreadManager direct-func, and lock removal on the request hot path, along with a complete benchmark and automated build pipeline.
-- [2026-06-30]: Released the FbThrift V1.1.0 patch based on Meta's open-source FbThrift serialization framework. This patch optimizes batch encoding of integer arrays in the FbThrift serialization framework, significantly improving serialization performance through the Arm SVE2 instruction set and compiler auto-vectorization.
+- [2026-06-30]: Released the FbThrift V1.0.0 patch based on Meta's open-source FbThrift serialization framework. This patch optimizes batch encoding of integer arrays in the FbThrift serialization framework, significantly improving serialization performance through the Arm SVE2 instruction set and compiler auto-vectorization.
 
 ## Project Introduction
 

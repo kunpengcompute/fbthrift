@@ -1,20 +1,24 @@
 # API Reference
 
-<!-- md-trans-meta sourceCommit=c085ca84d69a0b59b67552ad7e34db264c12bf60 translatedAt=2026-10-21T03:42:58.328Z pushedAt=2026-10-21T03:54:47.055Z -->
+<!-- md-trans-meta sourceCommit=3d99de672186d1c4a4ed973703ab844b69698f9d translatedAt=2026-11-17T03:42:58.328Z pushedAt=2026-11-18T03:54:47.055Z -->
 
-## FbThrift v1.1.0
+## FbThrift V1.1.0
 
-This chapter describes the ThreadManager task scheduling and Header frame processing interfaces newly added in FbThrift v1.1.0.
+This chapter describes the ThreadManager task scheduling and Header frame processing interfaces newly added in FbThrift V1.1.0.
 
-### FbThrift v1.1.0 Interface Introduction
+### FbThrift V1.1.0 Interface Introduction
 
 | Interface Name | Module | Description |
 |---|---|---|
-| ThreadManager::Impl::addFunc | ThreadManager | Directly receives and enqueues `folly::Func`, avoiding the need for regular RPC tasks to pre-construct a `FunctionRunner`. |
-| ThreadManager::Task::getRunnable | ThreadManager | When the legacy interface requires a `Runnable`, lazily wraps `folly::Func` into a `FunctionRunner` on demand. |
+| ThreadManager::Impl::addFunc | ThreadManager | Directly receives and enqueues `folly::Func`, avoiding the need for regular RPC tasks to pre-construct a FunctionRunner. |
+| ThreadManager::Task::getRunnable | ThreadManager | When the legacy interface requires a Runnable, lazily wraps `folly::Func` into a FunctionRunner on demand. |
 | THeader::removeHeader | Header Transport | Parses the message header and returns the complete frame length via an output parameter. |
 | FramingHandler::removeFrame | Header Transport | Returns the deframing result, remaining length, Header object, and frame length. |
 | FramingHandler::read | Header Transport | Dynamically adjusts the read buffer based on the moving average of frame lengths. |
+
+| Parameter | Description | Input/Output |
+|--|--|--|
+| queue | Input buffer queue to be parsed. After successful deframing, the consumed bytes are removed from the queue. | Input/Output |
 
 ### ThreadManager Task Scheduling Interfaces
 
@@ -62,7 +66,6 @@ const std::shared_ptr<Runnable>& ThreadManager::Task::getRunnable() const;
 ```
 
 >![note](public_sys-resources/icon-note.gif) **NOTE**
->
 >This interface is a lazy compatibility path and is not part of the regular execution path for regular RPC tasks.
 
 ### Header Frame Parsing and Adaptive Read Buffer Interfaces
@@ -71,7 +74,7 @@ const std::shared_ptr<Runnable>& ThreadManager::Task::getRunnable() const;
 
 ##### THeader::removeHeader Function Description
 
-Parses the Header frame from `IOBufQueue`. In addition to returning the message data and the number of bytes to be supplemented, FbThrift v1.1.0 adds the `frameLength` output parameter to pass the actual length of the complete frame to the upper layer. Returns 0 when the frame is empty or the data is incomplete.
+Parses the Header frame from `IOBufQueue`. In addition to returning the message data and the number of bytes to be supplemented, FbThrift V1.1.0 adds the `frameLength` output parameter to pass the actual length of the complete frame to the upper layer. Returns 0 when the frame is empty or the data is incomplete.
 
 ##### THeader::removeHeader Function Definition
 
@@ -125,15 +128,14 @@ readSize = std::clamp(avgRequestSize_ * 16, size_t(2048), size_t(524288));
 
 The calculated result is used to refresh the Pipeline read buffer setting, with the buffer size limited to the range of 2 KB to 512 KB. In the incomplete-frame scenario, the remaining bytes and the available space at the tail of the queue are also taken into account, reducing repeated reads for large frames while preventing small requests from occupying an excessively large fixed buffer for a long time.
 
-> ![note](public_sys-resources/icon-note.gif) **NOTE**
->
->The adaptive logic refreshes the buffer settings in the read path. Callers that rely on the fixed buffer semantics of `setReadBufferSize()` should perform regression verification when upgrading to FbThrift v1.1.0.
+>![note](public_sys-resources/icon-note.gif) **NOTE**
+>The adaptive logic refreshes the buffer settings in the read path. Callers that rely on the fixed buffer semantics of `setReadBufferSize()` should perform regression verification when upgrading to FbThrift V1.1.0.
 
-## FbThrift v1.0.0
+## FbThrift V1.0.0
 
-This chapter introduces the batch serialization interfaces for Compact Protocol and Binary Protocol provided by FbThrift v1.0.0.
+This chapter introduces the batch serialization interfaces for Compact Protocol and Binary Protocol provided by FbThrift V1.0.0.
 
-### FbThrift v1.0.0 Interface Introduction
+### FbThrift V1.0.0 Interface Introduction
 
 |Interface Name|Module|Description|
 |--|--|--|
@@ -380,4 +382,4 @@ For types or containers that do not meet the above conditions, the SFINAE mechan
 
 |Version|Date|Description|
 |:---|:---|:---|
-|01|2026-9-30|This is the first official release.|
+|01|2026-09-30|This is the first official release.|

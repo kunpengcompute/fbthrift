@@ -1,6 +1,6 @@
 # Release Notes
 
-<!-- md-trans-meta sourceCommit=c085ca84d69a0b59b67552ad7e34db264c12bf60 translatedAt=2026-10-21T03:42:55.713Z pushedAt=2026-10-21T03:54:49.292Z -->
+<!-- md-trans-meta sourceCommit=3d99de672186d1c4a4ed973703ab844b69698f9d translatedAt=2026-11-17T03:42:58.328Z pushedAt=2026-11-18T03:54:47.055Z -->
 
 ## Version Mapping
 
@@ -24,7 +24,7 @@
 </tr>
 <tr id="row34726251"><th class="firstcol" valign="top" width="42.17%" id="mcps1.1.3.2.1"><p id="p56669300"><a name="p56669300"></a><a name="p56669300"></a>Software Version</p>
 </th>
-<td class="cellrowborder" valign="top" width="57.830000000000005%" headers="mcps1.1.3.2.1 "><p id="p11923034"><a name="p11923034"></a><a name="p11923034"></a><span id="text189831542174711"><a name="text189831542174711"></a><a name="text189831542174711"></a>v1.1.0</span></p>
+<td class="cellrowborder" valign="top" width="57.830000000000005%" headers="mcps1.1.3.2.1 "><p id="p11923034"><a name="p11923034"></a><a name="p11923034"></a><span id="text189831542174711"><a name="text189831542174711"></a><a name="text189831542174711"></a>V1.1.0</span></p>
 </td>
 </tr>
 </tbody>
@@ -34,10 +34,9 @@
 
 |OS|CPU|Compiler|
 |--|--|--|
-|Linux systems such as Debian 12|AArch64 processors such as Kunpeng 920 and Kunpeng 950|Clang 16|
+|Debian 12|Kunpeng 920 and Kunpeng 950 processors|Clang 16|
 
-> ![note](public_sys-resources/icon-note.gif) **NOTE**
->
+>![note](public_sys-resources/icon-note.gif) **NOTE**
 > The Binary Protocol optimization does not depend on the SVE2 instruction set and can achieve performance improvements via automatic compiler vectorization on AArch64 and x86-64 platforms. The SVE2 optimization for the Compact Protocol takes effect only on CPUs that support the SVE2 instruction set, automatically falling back to the scalar path when it is not supported.
 
 ### Virus Scan Results
@@ -46,7 +45,7 @@ No software package release or virus scanning is involved.
 
 ## Version Compatibility Notes
 
-### FbThrift v1.1.0 Compatibility and Risk Description
+### FbThrift V1.1.0 Compatibility and Risk Description
 
 - ThreadManager retains the original `FunctionRunner` and `std::shared_ptr<Runnable>` interfaces. If compatibility issues occur, you can roll back by using `--thrift_thread_manager_direct_func_enabled=false`.
 - `THeader::removeHeader()` adds a `frameLength` reference parameter, and the return value of `FramingHandler::removeFrame()` is expanded from a triple to a quadruple. Custom callers, derived classes, and Python/Cython bindings must be modified synchronously and then recompiled.
@@ -59,30 +58,30 @@ For version usage instructions, see [Quick Start](./quick_start.md).
 
 ## Change Description
 
-### FbThrift v1.1.0
+### FbThrift V1.1.0
 
-#### New Features in FbThrift v1.1.0
+#### New Features in FbThrift V1.1.0
 
 | Feature | Description |
 |--|--|
-| Direct scheduling of `folly::Func` by ThreadManager | `ThreadManager::Task` stores tasks using `std::variant<std::shared_ptr<Runnable>, folly::Func>`. Regular RPCs are enqueued and executed directly via `addFunc()`, eliminating `FunctionRunner` allocation, `shared_ptr` reference counting, and virtual function forwarding on the regular hot path. |
-| Lazy compatibility for legacy task interfaces | `getRunnable()` defers the creation of a `FunctionRunner` until a legacy interface such as `removeNextPending()` or a task expiration callback explicitly requires a `Runnable`. The existing explicit `Runnable` submission path remains unchanged. |
-| ThreadManager runtime fallback | A new `thrift_thread_manager_direct_func_enabled` switch is added, with direct scheduling enabled by default. Setting it to `false` immediately restores the original `FunctionRunner::create()` path. |
-| Header frame length propagation | `THeader::removeHeader()` adds a new `frameLength` output parameter, and HeaderClientChannel, HeaderServerChannel, and DuplexChannel propagate the complete frame length to FramingHandler. |
-| Header adaptive read buffer | `FramingHandler::read()` maintains a moving average weighted by 10 samples based on frame length, dynamically sets the read buffer to 16 times the average frame length, and limits the range to 2 KB to 512 KB. |
+| Direct scheduling of `folly::Func` by ThreadManager | ThreadManager::Task stores tasks using `std::variant<std::shared_ptr<Runnable>, folly::Func>`. Regular RPCs are enqueued and executed directly via addFunc(), eliminating FunctionRunner allocation, `shared_ptr` reference counting, and virtual function forwarding on the regular hot path. |
+| Lazy compatibility for legacy task interfaces | getRunnable() defers the creation of a FunctionRunner until a legacy interface such as removeNextPending() or a task expiration callback explicitly requires a Runnable. The existing explicit Runnable submission path remains unchanged. |
+| ThreadManager runtime fallback | A new `thrift_thread_manager_direct_func_enabled` switch is added, with direct scheduling enabled by default. Setting it to `false` immediately restores the original FunctionRunner::create() path. |
+| Header frame length propagation | THeader::removeHeader() adds a new `frameLength` reference parameter, and HeaderClientChannel, HeaderServerChannel, and DuplexChannel propagate the complete frame length to FramingHandler. |
+| Header adaptive read buffer | FramingHandler::read() maintains a moving average weighted by 10 samples based on frame length, dynamically sets the read buffer to 16 times the average frame length, and limits the range to 2 KB to 512 KB. |
 | Dedicated unit tests | ThreadManager adds 5 dedicated unit tests for direct scheduling; Header frame length and FramingHandler add 14 test source cases, covering normal frames, empty queues, null pointers, framing, and adaptive calculation paths. |
 
-### FbThrift v1.0.0
+### FbThrift V1.0.0
 
-#### New Features in FbThrift v1.0.0
+#### New Features in FbThrift V1.0.0
 
 |Feature|Description|
 |--|--|
 |Compact Protocol batch Varint encoding optimization|Introduces a batch Varint encoding kernel based on the Arm SVE2 instruction set for contiguous integer arrays (int32/int64). It utilizes `dispatchVarintEncode32`/`dispatchVarintEncode64` for cross-translation-unit runtime dispatch, automatically enabling the vectorized kernel on CPUs that support SVE2 and falling back to the scalar path when unsupported.|
-|Binary Protocol batch write optimization|Introduces a tight loop based on `memcpy` and `bswap` for contiguous integer arrays (int16/int32/int64), leveraging automatic compiler vectorization to boost performance. The loop automatically unrolls into NEON instructions on AArch64 and into SSE2 instructions on x86-64.|
+|Binary Protocol batch write optimization|Introduces a tight loop based on memcpy and bswap for contiguous integer arrays (int16/int32/int64), leveraging automatic compiler vectorization to boost performance. The loop automatically unrolls into NEON instructions on AArch64 and into SSE2 instructions on x86-64.|
 |Compile-time SFINAE automatic dispatch|Utilizes `if constexpr` and `has_batched_int_list_writer` traits to automatically identify protocol and container types at compile time. It automatically selects the batch processing path for qualified contiguous integer arrays, while transparently falling back to per-element processing for unqualified types, ensuring zero intrusion into downstream service code.|
 
-#### FbThrift v1.0.0 Optimization Introduction
+#### FbThrift V1.0.0 Optimization Introduction
 
 |Protocol|Optimization Type|Supported Element Types|Trigger Condition|
 |--|--|--|--|
@@ -92,7 +91,7 @@ For version usage instructions, see [Quick Start](./quick_start.md).
 
 ## Documentation
 
-### FbThrift v1.1.0 Documentation
+### FbThrift V1.1.0 Documentation
 
 <a name="table1191773710200"></a>
 <table><thead align="left"><tr id="row1291816372202"><th class="cellrowborder" valign="top" width="45.019999999999996%" id="mcps1.1.4.1.1"><p id="p291823714205"><a name="p291823714205"></a><a name="p291823714205"></a>Document Name</p>

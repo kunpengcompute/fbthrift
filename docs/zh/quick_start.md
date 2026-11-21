@@ -2,6 +2,8 @@
 
 本文档指导用户从零构建带四项请求链路优化的FbThrift，并编译、启动配套Benchmark。四项优化包括动态收包缓冲区、Folly IOBuf TLS内存池、ThreadManager direct-func和请求热路径去锁。
 
+如需构建独立的 URMA 传输补丁，请直接阅读[URMA补丁快速入门](#urma补丁快速入门)。
+
 >![表示说明的图片](public_sys-resources/icon-note.gif) **说明:**
 >本文档适用版本：FbThrift V1.1.0。
 
@@ -477,8 +479,92 @@ THRIFT_ENABLE_ARM_SVE2 = True
 
    脚本会逐项运行`press_client`，并将QPS、吞吐量、平均延迟、P99延迟、成功率及客户端/服务端CPU利用率写入CSV。
 
+## URMA补丁快速入门
+
+### 获取基线源码并应用补丁
+
+在包含 [fbthrift_urma.patch](../../fbthrift_urma.patch) 和 [校验文件](../../fbthrift_urma.patch.sha256) 的本仓库根目录执行以下命令。选用空工作目录，将补丁直接应用于 Meta FbThrift `v2022.11.14.00`。
+
+```bash
+export PATCH_DIR="$PWD"
+export URMA_WORK="$HOME/fbthrift-urma"
+export URMA_PREFIX="$URMA_WORK/ins"
+sha256sum --check --strict fbthrift_urma.patch.sha256 &&
+  mkdir -p "$URMA_WORK" &&
+  git clone --branch v2022.11.14.00 --single-branch \
+    https://github.com/facebook/fbthrift.git "$URMA_WORK/fbthrift" &&
+  git -C "$URMA_WORK/fbthrift" apply --check "$PATCH_DIR/fbthrift_urma.patch" &&
+  git -C "$URMA_WORK/fbthrift" apply "$PATCH_DIR/fbthrift_urma.patch"
+```
+
+### 编译配套依赖和FbThrift
+
+按[安装系统依赖](#安装系统依赖)和[准备Clang 16](#准备clang-16)配置基础环境。在构建机安装 UMDK 开发包。下例使用 `/usr/include/ub/umdk/urma/urma_api.h` 和 `/usr/lib64/liburma.so`，安装路径不同时替换为实际路径。后续命令在同一 Bash 会话中执行。
+
+```bash
+cd "$URMA_WORK"
+git clone --branch dev_urma_20221104 --single-branch https://gitcode.com/boostkit/folly.git folly
+git clone --recurse-submodules --branch v2022.11.14.00 --single-branch https://github.com/facebookincubator/fizz.git fizz
+git clone --recurse-submodules --branch v2022.11.14.00 --single-branch https://github.com/facebook/wangle.git wangle
+```
+
+将四个组件装入同一目录。`FOLLY_USE_URMA` 是 Folly 的编译选项，FbThrift 通过安装后的 Folly 获得 URMA 支持。
+
+```bash
+export PATH="$URMA_PREFIX/bin:$PATH"
+export LD_LIBRARY_PATH="$URMA_PREFIX/lib:$URMA_PREFIX/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+build_install() {
+  local src="$1" out="$2"
+  shift 2
+  cmake -S "$src" -B "$out" -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_STANDARD=17 -DCMAKE_POLICY_DEFAULT_CMP0060=NEW \
+    -DCMAKE_INSTALL_PREFIX="$URMA_PREFIX" -DCMAKE_PREFIX_PATH="$URMA_PREFIX" \
+    -DCMAKE_MODULE_PATH="$URMA_WORK/folly/build/fbcode_builder/CMake" "$@" &&
+    cmake --build "$out" --parallel 8 --target install
+}
+
+build_install folly build/folly -DBUILD_SHARED_LIBS=ON -DBUILD_TESTS=OFF \
+  -DFOLLY_USE_URMA=ON -DURMA_INCLUDE_DIR=/usr/include/ub/umdk/urma \
+  -DURMA_LIBRARY=/usr/lib64/liburma.so &&
+build_install fizz/fizz build/fizz -DBUILD_SHARED_LIBS=ON -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF &&
+build_install wangle/wangle build/wangle -DBUILD_SHARED_LIBS=ON -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF &&
+build_install fbthrift build/fbthrift -DBUILD_SHARED_LIBS=OFF -Denable_tests=OFF \
+  -Dthriftpy=OFF -Dthriftpy3=OFF
+```
+
+### 验证URMA传输
+
+安装 GoogleTest 和 GoogleMock 开发包后，开启 FbThrift 测试并编译以下目标。
+
+```bash
+cmake -S fbthrift -B build/fbthrift -Denable_tests=ON &&
+  cmake --build build/fbthrift --parallel 8 --target \
+    UrmaServerTest-t UrmaEgressTest-t UrmaRequestRecordsTest-t \
+    UrmaRecordAllocationTest-t UrmaWriteBatchTest-t UrmaReceiveStorageTest-t \
+    ReplyQueueBackendYieldTest-t
+```
+
+使用 `urma_admin show --all` 确认可用设备，将下例的 `udmac1d1e2` 替换为本机设备名。未设置 `FBTHRIFT_URMA_TEST_DEVICE` 时，依赖硬件的用例会跳过。
+
+```bash
+export FBTHRIFT_URMA_TEST_DEVICE=udmac1d1e2
+ctest --test-dir build/fbthrift --output-on-failure \
+  -R '^(Urma(Server|Egress|RequestRecords|RecordAllocation|WriteBatch|ReceiveStorage)Test|ReplyQueueBackendYieldTest)$'
+```
+
+如需单独验证 TCP 和 URMA 客户端能否连接同一服务端口，可运行下面的用例。输出中应出现 `[       OK ] UrmaServerHardware.MixedTcpAndUrmaClients`。
+
+```bash
+GTEST_FILTER=UrmaServerHardware.MixedTcpAndUrmaClients \
+  ctest --test-dir build/fbthrift -R '^UrmaServerTest$' -V
+```
+
+在业务服务中启用 URMA，以及显式选择 Header 或 Rocket 的示例见《[URMA补丁接口说明](api_reference.md#urma补丁接口说明)》。
+
 ## 修订记录
 
 |文档版本|发布日期|修改说明|
 |:---|:---|:---|
 |01|2026-09-30|第一次正式发布。|
+|02|2026-12-30|新增独立的URMA补丁构建与验证步骤。|

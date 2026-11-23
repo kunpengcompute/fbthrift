@@ -69,9 +69,9 @@
 |Header自适应读缓冲|FramingHandler::read()根据帧长度维护10样本权重的滑动平均值，以平均帧长16倍动态设置读缓冲，并将范围限制在2KB至512KB。|
 |专项单元测试|ThreadManager新增5个直接调度专项UT；Header帧长和FramingHandler补充14个测试源码用例，覆盖正常帧、空队列、空指针、分帧及自适应计算路径。|
 
-### FbThrift V1.1.0
+### FbThrift V1.0.0
 
-#### FbThrift V1.1.0新增特性
+#### FbThrift V1.0.0新增特性
 
 |特性描述|更新说明|
 |--|--|

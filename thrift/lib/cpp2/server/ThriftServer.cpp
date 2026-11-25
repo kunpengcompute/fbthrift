@@ -527,7 +527,7 @@ void ThriftServer::setup() {
         } else {
           acceptorFactory = std::make_shared<DefaultThriftAcceptorFactory>(this);
         }
-#elif
+#else
         acceptorFactory = std::make_shared<DefaultThriftAcceptorFactory>(this);
 #endif
       }

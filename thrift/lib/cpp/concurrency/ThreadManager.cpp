@@ -947,7 +947,7 @@ std::unique_ptr<ThreadManager::Task> ThreadManager::Impl::waitOnTask() {
 
   // Otherwise, no tasks on the horizon, so go sleep
   if (shouldStop()) {
-    // check again because it might have changed by the time we got the mutex
+    // check again after the fast-path dequeue; stop state is atomic
     return nullptr;
   }
 

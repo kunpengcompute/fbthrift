@@ -39,6 +39,12 @@
 #include <folly/io/GlobalShutdownSocketSet.h>
 #include <folly/portability/Sockets.h>
 #include <folly/system/Pid.h>
+
+#ifdef FOLLY_HAVE_URMA
+#include <folly/io/async/urma/UrmaInit.h>
+#include <thrift/lib/cpp2/server/UrmaCpp2Worker.h>
+#endif
+
 #include <thrift/lib/cpp/concurrency/InitThreadFactory.h>
 #include <thrift/lib/cpp/concurrency/PosixThreadFactory.h>
 #include <thrift/lib/cpp/concurrency/Thread.h>
@@ -429,6 +435,16 @@ void ThriftServer::setup() {
   auto nWorkers = getNumIOWorkerThreads();
   DCHECK_GT(nWorkers, 0u);
 
+#ifdef FOLLY_HAVE_URMA
+  // URMA 初始化(useUrma_=true 时)
+  // urma_init + 设备发现 + MR 内存池 + IOBuf 注入全部封装在 folly::UrmaInit 中
+  if (useUrma_) {
+    folly::UrmaInit::init(urmaConfig_);
+    LOG(INFO) << "URMA enabled, dev=" << urmaConfig_.dev_name
+              << " threads=" << nWorkers;
+  }
+#endif
+
   addRoutingHandler(
       std::make_unique<apache::thrift::RocketRoutingHandler>(*this));
 
@@ -503,9 +519,18 @@ void ThriftServer::setup() {
             std::make_shared<folly::NamedThreadFactory>("Acceptor Thread"));
       }
 
-      auto acceptorFactory = acceptorFactory_
-          ? acceptorFactory_
-          : std::make_shared<DefaultThriftAcceptorFactory>(this);
+      auto acceptorFactory = acceptorFactory_;
+      if (!acceptorFactory) {
+#ifdef FOLLY_HAVE_URMA
+        if (useUrma_) {
+          acceptorFactory = std::make_shared<UrmaAcceptorFactory>(this);
+        } else {
+          acceptorFactory = std::make_shared<DefaultThriftAcceptorFactory>(this);
+        }
+#else
+        acceptorFactory = std::make_shared<DefaultThriftAcceptorFactory>(this);
+#endif
+      }
       if (auto factory = dynamic_cast<wangle::AcceptorFactorySharedSSLContext*>(
               acceptorFactory.get())) {
         sharedSSLContextManager_ = factory->initSharedSSLContextManager();

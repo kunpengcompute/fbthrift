@@ -1,5 +1,7 @@
 # API参考
 
+独立发布的 URMA 传输补丁见[URMA补丁接口说明](#urma补丁接口说明)。
+
 ## FbThrift V1.1.0
 
 本章介绍FbThrift V1.1.0新增的ThreadManager任务调度与Header帧处理接口。
@@ -376,8 +378,93 @@ void writeBeContiguous(folly::io::QueueAppender& out, const T* data, uint32_t si
 
 对于不满足上述条件的类型或容器，SFINAE机制自动回退到原有的逐元素序列化循环，确保兼容性。
 
+## URMA补丁接口说明
+
+### URMA接口介绍
+
+以下接口位于 `thrift/lib/cpp2/server/ThriftServer.h`。在服务端 `setup()` 或 `serve()` 前设置传输方式和设备。
+
+|接口名称|所属模块|接口说明|
+|--|--|--|
+|ThriftServer::setUseUrma|ThriftServer|启用或关闭 URMA 接入，默认关闭。|
+|ThriftServer::getUseUrma|ThriftServer|读取当前服务端的 URMA 开关。|
+|ThriftServer::setUrmaConfig|ThriftServer|保存本服务端请求使用的 Folly URMA 配置。|
+|ThriftServer::getUrmaConfig|ThriftServer|返回上述配置的常量引用。|
+
+### 服务端传输接口
+
+#### ThriftServer::setUseUrma、ThriftServer::getUseUrma
+
+##### 函数功能
+
+`setUseUrma(true)` 使同一明文监听端口可以接入普通 TCP 和 URMA 客户端。`getUseUrma()` 返回该开关的值。若编译 Folly 时未启用 URMA，显式开启后服务端会在启动时报错。
+
+##### 函数定义
+
+```cpp
+void ThriftServer::setUseUrma(bool enabled);
+bool ThriftServer::getUseUrma() const;
+```
+
+##### 参数说明
+
+|参数名|参数说明|输入/输出|
+|--|--|--|
+|enabled|`true` 启用 URMA 接入，`false` 使用普通 TCP 监听。|输入|
+
+#### ThriftServer::setUrmaConfig、ThriftServer::getUrmaConfig
+
+##### 函数功能
+
+`setUrmaConfig()` 将配置复制到服务端。`getUrmaConfig()` 返回服务端保存的配置。两个接口仅在 Folly 提供 `FOLLY_HAVE_URMA` 时可用。
+
+##### 函数定义
+
+```cpp
+void ThriftServer::setUrmaConfig(const folly::UrmaConfig& config);
+const folly::UrmaConfig& ThriftServer::getUrmaConfig() const;
+```
+
+##### 参数说明
+
+|参数名|参数说明|输入/输出|
+|--|--|--|
+|config|Folly URMA 配置。`dev_name` 必须填写本机可用的设备名。|输入|
+
+##### 使用示例
+
+在已有的 `ThriftServer` 上启用 URMA。进程内的多个 URMA 服务端须使用相同配置。若应用已自行初始化 Folly URMA，应将 `folly::UrmaInit::getConfig()` 传给服务端，并在最后一个相关服务端和连接释放后，由应用调用 `folly::UrmaInit::fini()`。
+
+```cpp
+folly::UrmaConfig config;
+config.dev_name = "udmac1d1e2";  // 替换为本机设备名
+server.setUrmaConfig(config);
+server.setUseUrma(true);
+```
+
+### 客户端通道
+
+独立的客户端进程先用本机设备配置调用一次 `folly::UrmaInit::init(config)`。在客户端的 `EventBase` 上创建 `UrmaAsyncSocket`，再选择业务协议。以下两个示例各创建一条连接，`serverAddress` 为服务端的明文监听地址。
+
+使用 Header 协议时，显式传入 `WithoutRocketUpgrade`。
+
+```cpp
+using apache::thrift::HeaderClientChannel;
+auto transport = folly::UrmaAsyncSocket::newSocket(&evb, serverAddress);
+auto header = HeaderClientChannel::newChannel(
+    HeaderClientChannel::WithoutRocketUpgrade{}, std::move(transport));
+```
+
+使用 Rocket 协议时，直接创建 `RocketClientChannel`。
+
+```cpp
+auto transport = folly::UrmaAsyncSocket::newSocket(&evb, serverAddress);
+auto rocket = apache::thrift::RocketClientChannel::newChannel(std::move(transport));
+```
+
 ## 修订记录
 
 |文档版本|发布日期|修改说明|
 |:---|:---|:---|
 |01|2026-09-30|第一次正式发布。|
+|02|2026-12-30|新增独立的URMA补丁服务端配置接口和客户端通道示例。|

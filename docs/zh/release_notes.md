@@ -1,5 +1,7 @@
 # 版本说明书
 
+独立发布的 URMA 传输补丁见[URMA补丁说明](#urma补丁说明)。
+
 ## 版本配套说明
 
 ### 产品版本信息
@@ -86,6 +88,35 @@
 |Compact Protocol|ARM SVE2批量Varint编码|int32_t, int64_t|编译开启THRIFT_ENABLE_ARM_SVE2且运行时CPU支持SVE2。|
 |Compact Protocol|Scalar批量Varint编码（回退）|int32_t, int64_t|编译未开启SVE2或运行时CPU不支持SVE2。|
 |Binary Protocol|编译器自动向量化批量写入|int16_t, int32_t, int64_t|容器为连续内存布局。|
+
+## URMA补丁说明
+
+### 产品版本信息
+
+FbThrift URMA 补丁的发布日期为 2026-12-30。将 [fbthrift_urma.patch](../../fbthrift_urma.patch) 直接应用于干净的 Meta FbThrift `v2022.11.14.00` 源码，完整性校验使用随包的 [SHA-256 文件](../../fbthrift_urma.patch.sha256)。
+
+|软件|配套要求|
+|--|--|
+|Folly|使用 [BoostKit Folly URMA 分支](https://gitcode.com/boostkit/folly/tree/dev_urma_20221104)，编译时启用 `FOLLY_USE_URMA`。FbThrift、Fizz、Wangle 和应用使用同一份 Folly。|
+|Fizz、Wangle|与 FbThrift 配套的 `v2022.11.14.00`。|
+|URMA 运行环境|编译需要 UMDK 的 `urma_api.h` 和 `liburma.so`。运行 URMA 的客户端和服务端各自需要可用的本地设备。|
+
+### URMA新增特性
+
+|特性描述|更新说明|
+|--|--|
+|同端口接入|普通 TCP 和 URMA 客户端可连接同一明文服务端口。识别到 URMA HELLO 前缀后开始握手计时，普通 TCP 连接沿用原有空闲超时。|
+|Header 和 Rocket 收发|批量写入保留每条序列化消息的边界。小消息通过 SEND/RECV 传输，超过 Folly 的 READ 阈值且双方支持时，由接收端单边读取正文。|
+|接收缓冲生命周期|Header 和 Rocket 的解析器可持有接收正文的 IOBuf。业务反序列化到 `std::string` 时仍会复制数据。|
+|Rocket 发送控制|URMA 上报待发送字节和仍持有的写缓冲容量，Rocket 使用这些信息执行发送背压与内存限制。|
+
+### URMA兼容性与使用注意事项
+
+- 服务端默认使用 TCP。启用 URMA 时须显式指定本地设备。设备初始化或 URMA 握手失败时向调用方报错。
+- URMA 使用明文传输。显式要求 TLS、配置 TLS 凭据、启用 io_uring 套接字、双工服务或使用自定义 acceptor 时，服务端启动会拒绝该配置。
+- 同一进程内的 URMA 服务端须使用相同配置。启用 Folly 注册内存池后，该进程内的普通 TCP 连接也可能从中分配 IOBuf。
+
+编译与同端口接入验证见《[URMA补丁快速入门](quick_start.md#urma补丁快速入门)》。服务端配置和客户端通道示例见《[URMA补丁接口说明](api_reference.md#urma补丁接口说明)》。
 
 ## 版本配套文档
 
